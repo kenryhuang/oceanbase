@@ -1893,7 +1893,6 @@ namespace oceanbase
             if (!(*it)->is_merged())
             {
               tablets[merge_count++] = *it;
-              (*it)->inc_merge_count();
               // add reference count
               image_tracker_[index]->acquire();
             }

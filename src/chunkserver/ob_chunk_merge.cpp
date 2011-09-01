@@ -13,7 +13,7 @@
  *     maoqi <maoqi@taobao.com>
  * Changes: 
  *     qushan <qushan@taobao.com>
- *
+ *     
  */
 
 #include "ob_chunk_server_main.h"
@@ -381,6 +381,7 @@ namespace oceanbase
               {
                 TBSYS_LOG(WARN,"merge tablet failed");
               }
+              tablet->inc_merge_count();
               atomic_dec(ref);
             }
           }
@@ -653,7 +654,7 @@ namespace oceanbase
       if (NULL == stat)
       {
         //TBSYS_LOG(WARN,"get stat failed");
-        err = OB_ERROR;
+        current_request_count_  = 0;
       }
       else
       {
