@@ -329,14 +329,28 @@ int show_schema()
 {
   int ret = OB_SUCCESS;
 
-  ObSchemaManagerV2 schema_mgr;
+  ObSchemaManagerV2* schema_mgr = new (std::nothrow) ObSchemaManagerV2;
+  if (NULL == schema_mgr)
+  {
+    fprintf(stderr, "no enough memory");
+    ret = OB_MEM_OVERFLOW;
+  }
+  else
+  {
+    ret = GFactory::get_instance().get_rpc_stub().fetch_schema(*schema_mgr);
 
-  ret = GFactory::get_instance().get_rpc_stub().fetch_schema(schema_mgr);
-  if (OB_SUCCESS != ret) 
-    return ret;
+    if (OB_SUCCESS == ret)
+    {
+      oceanbase::obsql::ObSchemaPrinter schema_prt(*schema_mgr);
+      ret = schema_prt.output();
+    }
+  }
 
-  oceanbase::obsql::ObSchemaPrinter schema_prt(schema_mgr);
-  ret = schema_prt.output();
+  if (NULL != schema_mgr)
+  {
+    delete schema_mgr;
+    schema_mgr = NULL;
+  }
 
   return ret;
 }
@@ -472,14 +486,16 @@ int main(const int argc, char *argv[])
   if ( OB_SUCCESS != ret)
   {
     usage();
-    return ret;
+    //return ret;
+    goto RET;
   }
 
   ret = GFactory::get_instance().initialize(root_server);
   if (OB_SUCCESS != ret)
   {
     fprintf(stderr, "initialize GFactory error, ret=%d\n", ret);
-    return ret;
+    //return ret;
+    goto RET;
   }
 
   while ( !exit_flag)
@@ -616,6 +632,7 @@ int main(const int argc, char *argv[])
     
   }
 
+RET:
   GFactory::get_instance().stop();
   GFactory::get_instance().wait();
 
