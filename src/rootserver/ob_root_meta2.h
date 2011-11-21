@@ -39,9 +39,24 @@ namespace oceanbase
       void dump() const;
       void dump_as_hex(FILE* stream) const;
       void read_from_hex(FILE* stream);
+      bool did_cs_have(const int32_t cs_idx) const;
       NEED_SERIALIZE_AND_DESERIALIZE;
     };
-
+    
+    inline bool ObRootMeta2::did_cs_have(const int32_t cs_idx) const
+    {
+      bool ret = false;
+      for (int i = 0; i < common::OB_SAFE_COPY_COUNT; ++i)
+      {
+        if (cs_idx == server_info_indexes_[i])
+        {
+          ret = true;
+          break;
+        }
+      }
+      return ret;
+    }
+    
     class ObRootMeta2CompareHelper
     {
       public:

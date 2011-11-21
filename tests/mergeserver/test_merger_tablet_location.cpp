@@ -276,8 +276,6 @@ TEST_F(TestTabletLocation, test_set)
     //EXPECT_TRUE(temp_location.begin()->tablet_id_ == (i/10 * 10));
     EXPECT_TRUE(temp_location[0].server_.chunkserver_.get_port() == (int32_t)(i/10 * 10 + 1023));
     EXPECT_TRUE(temp_location[0].server_.chunkserver_.get_ipv4() == (int32_t)(i/10 * 10 + 255));
-    //printf("timestamp[%ld], row_key[%s], host[%u]\n", temp_location.get_timestamp(), 
-    //    temp, temp_location[0].server_.chunkserver_.get_ipv4());
   }
 
   // del
@@ -305,6 +303,107 @@ TEST_F(TestTabletLocation, test_set)
     //printf("get rowkey[%s]\n", temp);
     ret = cache.get(1, start_key, temp_location);
     EXPECT_TRUE(ret != OB_SUCCESS);
+  }
+}
+
+
+TEST_F(TestTabletLocation, test_split)
+{
+  ObMergerTabletLocationCache cache;
+  int ret = cache.init(50000 * 5, 1000, 10000);
+  EXPECT_TRUE(ret == OB_SUCCESS);
+
+  char temp[100];
+  char temp_end[100];
+  uint64_t count = 0;
+  ObMergerTabletLocationList temp_location;
+  // warning
+  // not more than 10 bit rows because of the string key
+  const uint64_t START_ROW = 10L;
+  const uint64_t MAX_ROW = 85L;
+  for (uint64_t i = START_ROW; i < MAX_ROW; i += 10)
+  {
+    ObServer server;
+    server.set_ipv4_addr(i + 256, 1024 + i);
+    ObTabletLocation addr(i, server);
+    ObMergerTabletLocationList location;
+    EXPECT_TRUE(OB_SUCCESS == location.add(addr));
+    EXPECT_TRUE(OB_SUCCESS == location.add(addr));
+    EXPECT_TRUE(OB_SUCCESS == location.add(addr));
+
+    snprintf(temp, 100, "row_%lu", i);
+    snprintf(temp_end, 100, "row_%lu", i + 10);
+    ObString start_key(100, strlen(temp), temp);
+    ObString end_key(100, strlen(temp_end), temp_end);
+
+    ObRange range;
+    range.table_id_ = 1;
+    range.start_key_ = start_key;
+    range.end_key_ = end_key;
+
+    ret = cache.set(range, location);
+    EXPECT_TRUE(ret == OB_SUCCESS);
+
+    // get location 
+    ret = cache.get(1, end_key, temp_location);
+    EXPECT_TRUE(ret == OB_SUCCESS);
+    EXPECT_TRUE(temp_location.get_timestamp() < tbsys::CTimeUtil::getTime());
+    
+    // small data
+    EXPECT_TRUE(temp_location[0].server_.chunkserver_.get_port() == (int32_t)(i + 1024));
+    EXPECT_TRUE(temp_location[0].server_.chunkserver_.get_ipv4() == (int32_t)(i + 256));
+    
+    // overwrite
+    ret = cache.set(range, location);
+    EXPECT_TRUE(ret == OB_SUCCESS);
+
+    // cache item count
+    ++count;
+    EXPECT_TRUE(cache.size() == count);
+  }
+  //
+  EXPECT_TRUE(cache.size() == count);
+  
+  // split
+  count = 0;
+  for (uint64_t i = START_ROW; i < MAX_ROW; i += 5)
+  {
+    ObServer server;
+    server.set_ipv4_addr(i + 255, 1023 + i);
+    ObTabletLocation addr(i, server);
+    ObMergerTabletLocationList location;
+    EXPECT_TRUE(OB_SUCCESS == location.add(addr));
+    EXPECT_TRUE(OB_SUCCESS == location.add(addr));
+    EXPECT_TRUE(OB_SUCCESS == location.add(addr));
+    snprintf(temp, 100, "row_%lu", i);
+    snprintf(temp_end, 100, "row_%lu", i + 5);
+    ObString start_key(100, strlen(temp), temp);
+    ObString end_key(100, strlen(temp_end), temp_end);
+    ObRange range;
+    range.table_id_ = 1;
+    range.start_key_ = start_key;
+    range.end_key_ = end_key;
+    location.set_timestamp(i);
+    ret = cache.set(range, location);
+    EXPECT_TRUE(ret == OB_SUCCESS);
+    snprintf(temp, 100, "row_%ld", i+1);
+    start_key.assign(temp, strlen(temp));
+    ret = cache.get(1, start_key, temp_location);
+    EXPECT_TRUE(ret == OB_SUCCESS);
+    ++count;
+  }
+
+  // just overwrite all
+  for (uint64_t i = START_ROW; i < MAX_ROW; ++i)
+  {
+    snprintf(temp, 100, "row_%ld", i+1);
+    ObString start_key(100, strlen(temp), temp);
+    ret = cache.get(1, start_key, temp_location);
+    EXPECT_TRUE(ret == OB_SUCCESS);
+    printf("expect[%ld:%ld], real[%d:%d]\n", (i/5 * 5 + 255), (i/5 * 5 + 1023), 
+        temp_location[0].server_.chunkserver_.get_ipv4(), temp_location[0].server_.chunkserver_.get_port());
+    EXPECT_TRUE(temp_location[0].server_.chunkserver_.get_port() == (int32_t)(i/5 * 5 + 1023));
+    EXPECT_TRUE(temp_location[0].server_.chunkserver_.get_ipv4() == (int32_t)(i/5 * 5 + 255));
   }
 }
 
@@ -385,7 +484,6 @@ void * get_routine(void * argv)
   return NULL;
 }
 
-
 void * set_routine(void * argv)
 {
   ObMergerTabletLocationCache * cache = (ObMergerTabletLocationCache *) argv;
@@ -449,7 +547,7 @@ void * update_routine(void * argv)
   return NULL;
 }
 
-#if true 
+#if false 
 TEST_F(TestTabletLocation, test_thread)
 {
   ObMergerTabletLocationCache cache;

@@ -264,6 +264,31 @@ namespace oceanbase
         }
         else
         {
+          // reverse block, store as asc order.
+          int64_t max_count = find - bound.begin_ + 1;
+          if (max_count > need_block_count) { max_count = need_block_count; }
+          const_iterator start = find - max_count + 1;
+
+
+          for (; start <= find && count < max_count; ++start)
+          {
+            if (!match_table_group(*start, table_id, column_group_id)) 
+            {
+              continue;
+            }
+
+            // locate end postion in blocks.
+            if (NULL != end_key.ptr() && end_key.compare(get_end_key(start)) > 0 )
+            {
+              continue;
+            }
+
+            pos_info.position_info_[count].offset_ = start->block_offset_;
+            pos_info.position_info_[count].size_ = start->block_record_size_;
+            ++count;
+          }
+
+          /*
           // store from find to bound.begin_, desc order
           for (; find >= bound.begin_ && count < need_block_count; --find)
           {
@@ -279,6 +304,7 @@ namespace oceanbase
             pos_info.position_info_[count].size_ = find->block_record_size_;
             ++count;
           }
+          */
         }
         pos_info.block_count_ = count;
 

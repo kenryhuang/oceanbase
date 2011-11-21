@@ -26,7 +26,7 @@ public class QueryInfo {
 	private int pageNum;
 	private int limit = Const.MAX_ROW_NUMBER_PER_QUERY;
 	private ObSimpleFilter filter;
-	private boolean isReadConsistency = true;
+	private boolean isReadConsistency = false;
 	//private ObGroupByParam groupbyParam;
 	
 	// scan flag

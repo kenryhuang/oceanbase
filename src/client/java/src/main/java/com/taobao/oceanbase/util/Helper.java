@@ -10,6 +10,7 @@ import org.apache.commons.logging.LogFactory;
 import com.taobao.oceanbase.network.Server;
 import com.taobao.oceanbase.network.SessionFactory;
 import com.taobao.oceanbase.network.mina.MinaServer;
+import com.taobao.oceanbase.server.ObInstanceManager;
 import com.taobao.oceanbase.vo.RowData;
 import com.taobao.oceanbase.vo.inner.ObCell;
 import com.taobao.oceanbase.vo.inner.ObRow;
@@ -106,6 +107,20 @@ public class Helper {
 				port = Integer.parseInt(a[1].trim());
 		}
 		return port;
+	}
+	
+	public static int getVersion(String address) {
+		int version = ObInstanceManager.VERSION;
+		if (address != null) {
+			String[] a = address.split(":");
+			if (a.length >= 3) {
+				if (a[2].trim().equalsIgnoreCase("0.1")) 
+					version = ObInstanceManager.OLD_VERSION;
+				else
+					version = ObInstanceManager.VERSION;
+			}
+		}
+		return version;
 	}
 
 }

@@ -13,7 +13,7 @@
  *     maoqi <maoqi@taobao.com>
  * Changes: 
  *     qushan <qushan@taobao.com>
- *     
+ *
  */
 
 #include "ob_chunk_server_main.h"
@@ -43,12 +43,14 @@ namespace oceanbase
                                    tablet_index_(0),thread_num_(0),
                                    tablets_have_got_(0), active_thread_num_(0),
                                    frozen_version_(0), frozen_timestamp_(0),newest_frozen_version_(0),
-                                   merge_start_time_(0),merge_last_end_time_(0), max_merge_duration_(0),
+                                   merge_start_time_(0),merge_last_end_time_(0),
                                    tablet_manager_(NULL),
                                    last_end_key_buffer_(common::OB_MAX_ROW_KEY_LENGTH),
                                    cur_row_key_buffer_(common::OB_MAX_ROW_KEY_LENGTH),
                                    round_start_(true),round_end_(false), pending_in_upgrade_(false),
-                                   merge_load_high_(0),request_count_high_(0)
+                                   merge_load_high_(0),request_count_high_(0), merge_adjust_ratio_(0),
+                                   merge_load_adjust_(0), merge_pause_row_count_(0), merge_pause_sleep_time_(0),
+                                   merge_highload_sleep_time_(0), ups_stream_wrapper_(NULL)
                                    
     {
       //memset(reinterpret_cast<void *>(&pending_merge_),0,sizeof(pending_merge_));
@@ -59,76 +61,158 @@ namespace oceanbase
 
     }
 
+    int ObChunkMerge::fetch_update_server_list()
+    {
+      int ret = OB_SUCCESS;
+      int32_t update_server_count = 0;
+      if (NULL == ups_stream_wrapper_)
+      {
+        ret = OB_ERROR;
+      }
+      else 
+      {
+        ret = ups_stream_wrapper_->get_ups_rpc_proxy()->fetch_update_server_list(update_server_count);
+      }
+      return ret;
+    }
+
+    int ObChunkMerge::fetch_update_server_for_merge()
+    {
+      int ret = OB_SUCCESS;
+      ObServer ups_addr;
+      char ups_addr_str[OB_MAX_SERVER_ADDR_SIZE];
+      if (NULL == ups_stream_wrapper_)
+      {
+        ret = OB_ERROR;
+      }
+      else 
+      {
+        int32_t retry_times = THE_CHUNK_SERVER.get_param().get_retry_times();
+        rpc_retry_wait(inited_, retry_times, 
+            ret, THE_CHUNK_SERVER.get_rs_rpc_stub().get_update_server(ups_addr, true));
+        if (OB_SUCCESS == ret)
+        {
+          ups_addr.to_string(ups_addr_str, OB_MAX_SERVER_ADDR_SIZE);
+          TBSYS_LOG(INFO, "fetch merge update server addr %s", ups_addr_str);
+          ups_stream_wrapper_->set_update_server(ups_addr);
+        }
+      }
+      return ret;
+    }
+
+    void ObChunkMerge::set_config_param()
+    {
+      ObChunkServer& chunk_server = ObChunkServerMain::get_instance()->get_chunk_server();
+      merge_load_high_ = chunk_server.get_param().get_merge_threshold_load_high();
+      request_count_high_ = chunk_server.get_param().get_merge_threshold_request_high();
+      merge_adjust_ratio_ = chunk_server.get_param().get_merge_adjust_ratio();
+      merge_load_adjust_ = (merge_load_high_ * merge_adjust_ratio_) / 100;
+      merge_pause_row_count_ = chunk_server.get_param().get_merge_pause_row_count();
+      merge_pause_sleep_time_ = chunk_server.get_param().get_merge_pause_sleep_time();
+      merge_highload_sleep_time_ = chunk_server.get_param().get_merge_highload_sleep_time();
+
+    }
+
+    int ObChunkMerge::create_merge_threads(const int32_t max_merge_thread)
+    {
+      int ret = OB_SUCCESS;
+
+      active_thread_num_ = max_merge_thread;
+      if (0 == thread_num_)
+      {
+        for (int32_t i=0; i < max_merge_thread; ++i)
+        {
+          if ( 0 != pthread_create(&tid_[thread_num_],NULL,ObChunkMerge::run,this))
+          {
+            TBSYS_LOG(ERROR, "create merge thread failed, exit.");
+            ret = OB_ERROR;
+            break;
+          }
+          TBSYS_LOG(INFO,"create merge thread [%d] success.",thread_num_);
+          ++thread_num_;
+        }
+      }
+
+      if (max_merge_thread != thread_num_)
+      {
+        ret = OB_ERROR;
+        TBSYS_LOG(ERROR,"merge : create merge thread failed, create(%d) != need(%d)",
+            thread_num_, max_merge_thread);
+      }
+
+      return ret;
+    }
 
     int ObChunkMerge::init(ObTabletManager *manager)
     {
       int ret = OB_SUCCESS;
-      
+      ObChunkServer& chunk_server = ObChunkServerMain::get_instance()->get_chunk_server();
+
       if (NULL == manager)
       {
         TBSYS_LOG(ERROR,"input error,manager is null");
         ret = OB_ERROR;
       }
+      else if ( NULL == (ups_stream_wrapper_ = 
+            new (std::nothrow) ObMSUpsStreamWrapper(
+              chunk_server.get_param().get_retry_times(),
+              chunk_server.get_param().get_merge_timeout(), 
+              chunk_server.get_param().get_root_server())) )
+      {
+        TBSYS_LOG(ERROR, "cannot allocate ObMSUpsStreamWrapper.");
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      }
+      else if ( OB_SUCCESS != (ret = ups_stream_wrapper_->init(
+              chunk_server.get_thread_specific_rpc_buffer(),
+              &chunk_server.get_client_manager())) )
+      {
+        TBSYS_LOG(ERROR, "init ups_stream_wrapper_ failed, ret = %d",ret);
+      }
       else if (!inited_)
       {
+        inited_ = true;
+
         tablet_manager_ = manager;
-
-        ObChunkServer& chunk_server = ObChunkServerMain::get_instance()->get_chunk_server();
-        int32_t max_merge_thread = chunk_server.get_param().get_max_merge_thread(); 
-
-        if (max_merge_thread <= 0 || max_merge_thread > MAX_MERGE_THREAD)
-          max_merge_thread = MAX_MERGE_THREAD;
-
-        max_merge_duration_ = chunk_server.get_param().get_max_merge_duration();
-        merge_load_high_ = chunk_server.get_param().get_merge_threshold_load_high();
-        request_count_high_ = chunk_server.get_param().get_merge_threshold_request_high();
-        merge_adjust_ratio_ = chunk_server.get_param().get_merge_adjust_ratio();
-        merge_load_adjust_ = (merge_load_high_ * merge_adjust_ratio_) / 100;
+        frozen_version_ = manager->get_serving_data_version();
+        newest_frozen_version_ = frozen_version_; 
 
         pthread_mutex_init(&mutex_,NULL);
         pthread_cond_init(&cond_,NULL);
-        frozen_version_ = manager->get_serving_data_version();
-        newest_frozen_version_ = frozen_version_; 
-        inited_ = true;
 
-        if (0 == thread_num_)
+        int32_t max_merge_thread = chunk_server.get_param().get_max_merge_thread(); 
+        if (max_merge_thread <= 0 || max_merge_thread > MAX_MERGE_THREAD)
+          max_merge_thread = MAX_MERGE_THREAD;
+
+        set_config_param();
+
+        // try to fetch updateserver list, if not succeed, leave it to timer task.
+        if ( OB_SUCCESS != (fetch_update_server_list()) )
         {
-          for (int32_t i=0; i < max_merge_thread; ++i)
-          {
-            if ( 0 != pthread_create(&tid_[thread_num_],NULL,ObChunkMerge::run,this))
-            {
-              ret = OB_ERROR;
-              break;
-            }
-            TBSYS_LOG(INFO,"create merge thread [%d] success.",thread_num_);
-            ++thread_num_;
-          }
+          TBSYS_LOG(WARN, "fetch update server list error, cannot merge.");
         }
 
-        if (0 == thread_num_)
+        // if rootserver has no update server list, only got updateserver's vip
+        // we still work correctly.
+        if (OB_SUCCESS != (ret = fetch_update_server_for_merge()))
         {
-          ret = OB_ERROR;
-          TBSYS_LOG(ERROR,"merge : no thread created");
+          TBSYS_LOG(ERROR, "fetch_update_server_for_merge error, ret=%d", ret);
         }
         else
         {
-          active_thread_num_ = thread_num_;
+          ret = create_merge_threads(max_merge_thread);
         }
 
-        //TODO
-        if ( OB_SUCCESS == ret && (OB_SUCCESS == expired_sstable_pool_.init()))
-          expired_sstable_pool_.scan(); 
       }
       else
       {
         TBSYS_LOG(WARN,"ObChunkMerge have been inited");
       }
 
-      if (OB_SUCCESS != ret)
+      if (OB_SUCCESS != ret && inited_)
       {
-        inited_ = false;
         pthread_mutex_destroy(&mutex_);
         pthread_cond_destroy(&cond_);
+        inited_ = false;
       }
       return ret;
     }
@@ -147,6 +231,12 @@ namespace oceanbase
         }
         pthread_cond_destroy(&cond_);
         pthread_mutex_destroy(&mutex_);
+      }
+
+      if (NULL != ups_stream_wrapper_)
+      {
+        delete ups_stream_wrapper_;
+        ups_stream_wrapper_ = NULL;
       }
     }
 
@@ -193,7 +283,7 @@ namespace oceanbase
       else if (0 == tablet_manager_->get_serving_data_version()) //new chunkserver
       {
         // empty chunkserver, no need to merge.
-        frozen_version_ = frozen_version;
+        TBSYS_LOG(INFO, "empty chunkserver , wait for migrate in.");
         ret = OB_CS_EAGAIN;
       }
       else
@@ -206,6 +296,12 @@ namespace oceanbase
         frozen_version_ += 1;
 
         ret = start_round(frozen_version_);
+        if (OB_SUCCESS != ret)
+        {
+          // start merge failed, maybe rootserver or updateserver not in serving.
+          // restore old frozen_version_ for next merge process.
+          frozen_version_ -= 1;
+        }
       }
 
       if (inited_ && OB_SUCCESS == ret && thread_num_ > 0)
@@ -243,23 +339,7 @@ namespace oceanbase
       ObTabletMerger *merger = NULL;
       RowKeySwap  swap;
 
-      //get the addr of ups first
       ObChunkServer&  chunk_server = ObChunkServerMain::get_instance()->get_chunk_server();
-      while(true)
-      {
-        if ( OB_SUCCESS == (ret = chunk_server.get_rs_rpc_stub().get_update_server(update_server_,true)))
-        {
-          break;
-        } 
-        
-        if (!inited_)
-        {
-          ret = OB_ERROR; //quit
-          break;
-        }
-        
-        usleep(sleep_interval); //5s
-      }
 
       if (OB_SUCCESS == ret)
       {
@@ -366,7 +446,7 @@ namespace oceanbase
           }
           else
           {
-            if ( ((newest_frozen_version_ - tablet->get_data_version()) > chunk_server.get_param().get_max_verion_gap()) )
+            if ( ((newest_frozen_version_ - tablet->get_data_version()) > chunk_server.get_param().get_max_version_gap()) )
             {
               TBSYS_LOG(ERROR,"this tablet version (%ld : %ld) is too old,maybe don't need to merge",
                   tablet->get_data_version(),newest_frozen_version_);
@@ -422,13 +502,16 @@ namespace oceanbase
       else
       {
         ObServer ups_addr;
-        rpc_busy_wait(inited_, ret, THE_CHUNK_SERVER.get_rs_rpc_stub().get_update_server(ups_addr, false));
+        int32_t retry_times  = THE_CHUNK_SERVER.get_param().get_retry_times();
+        rpc_retry_wait(inited_, retry_times, ret, 
+            THE_CHUNK_SERVER.get_rs_rpc_stub().get_update_server(ups_addr, false));
 
         if (OB_SUCCESS == ret)
         {
           ObRootServerRpcStub rpc_stub;
           rpc_stub.init(ups_addr, &THE_CHUNK_SERVER.get_client_manager());
-          rpc_busy_wait(inited_, ret, rpc_stub.get_frozen_time(frozen_version, frozen_time));
+          retry_times  = THE_CHUNK_SERVER.get_param().get_retry_times();
+          rpc_retry_wait(inited_, retry_times, ret, rpc_stub.get_frozen_time(frozen_version, frozen_time));
         }
       }
       return ret;
@@ -453,8 +536,11 @@ namespace oceanbase
         last_schema_ = current_schema_;
       }
 
+      int32_t retry_times = THE_CHUNK_SERVER.get_param().get_retry_times();
+
       // fetch current schema with frozen_version_;
-      rpc_busy_wait(inited_, ret, THE_CHUNK_SERVER.get_rs_rpc_stub().fetch_schema(frozen_version, current_schema_));
+      rpc_retry_wait(inited_, retry_times, ret, 
+          THE_CHUNK_SERVER.get_rs_rpc_stub().fetch_schema(frozen_version, current_schema_));
       if (OB_SUCCESS == ret)
       {
         if(current_schema_.get_version() > 0 && last_schema_.get_version() > 0)
@@ -479,7 +565,7 @@ namespace oceanbase
       }
       else if (OB_SUCCESS != (ret = fetch_frozen_time_busy_wait(frozen_version, frozen_timestamp_)))
       {
-        TBSYS_LOG(WARN, "cannot fetch frozen %ld timestamp from updateserver.", frozen_version_);
+        TBSYS_LOG(WARN, "cannot fetch frozen %ld timestamp from updateserver.", frozen_version);
       }
       else if (OB_SUCCESS != (ret = tablet_manager_->prepare_merge_tablets(frozen_version)))
       {
@@ -489,7 +575,6 @@ namespace oceanbase
       {
         TBSYS_LOG(INFO, "new merge process, version=%ld, frozen_timestamp_=%ld", 
             frozen_version, frozen_timestamp_);
-        tablet_manager_->get_join_cache().destroy();
       }
 
       return ret;
@@ -513,8 +598,11 @@ namespace oceanbase
         // switch to use new cache.
         tablet_manager_->get_join_cache().destroy();
         tablet_manager_->switch_cache(); //switch cache
+        tablet_manager_->get_disk_manager().scan(THE_CHUNK_SERVER.get_param().get_datadir_path(),
+            THE_CHUNK_SERVER.get_param().get_max_sstable_size());
         // report tablets
         tablet_manager_->report_tablets();
+        tablet_manager_->report_capacity_info();
 
         // upgrade complete, no need pending, for migrate in.
         pending_in_upgrade_ = false;
@@ -523,6 +611,9 @@ namespace oceanbase
         // now we suppose old cache not used by others,
         // drop it.
         tablet_manager_->drop_unserving_cache(); //ignore err
+        // re scan all local disk to recycle sstable 
+        // left by RegularRecycler. e.g. migrated sstable.
+        tablet_manager_->get_scan_recycler().recycle();
 
         round_end_ = true;
         merge_last_end_time_ = tbsys::CTimeUtil::getTime();
@@ -704,9 +795,8 @@ namespace oceanbase
       row_num_(0),
       pre_column_group_row_num_(0),
       cs_proxy_(manager),
-      ms_wrapper_(ObChunkServerMain::get_instance()->get_chunk_server().get_param().get_retry_times(),
-                  ObChunkServerMain::get_instance()->get_chunk_server().get_param().get_merge_timeout(), 
-                  chunk_merge.get_update_server()),merge_join_agent_(cs_proxy_)
+      ms_wrapper_(chunk_merge.get_ups_stream_wrapper()),
+      merge_join_agent_(cs_proxy_)
     {}
 
     int ObTabletMerger::init(ObChunkMerge::RowKeySwap *swap)
@@ -726,19 +816,21 @@ namespace oceanbase
         max_sstable_size_ = chunk_server.get_param().get_max_sstable_size();
       }
       
-      //init ms_wrapper
-      if (OB_SUCCESS == ret)
-      {
-        if ( (ret = ms_wrapper_.init(chunk_server.get_thread_specific_rpc_buffer(),
-                &chunk_server.get_client_manager())) != OB_SUCCESS )
-        {
-          TBSYS_LOG(ERROR, "init ObMSGetCellStreamWrapper failed [%d]",ret);
-        }
-      }
 
       if (OB_SUCCESS == ret && chunk_server.get_param().get_join_cache_conf().cache_mem_size > 0)
       {
         ms_wrapper_.get_ups_get_cell_stream()->set_cache(manager_.get_join_cache());
+      }
+
+      if (OB_SUCCESS == ret)
+      {
+        int64_t dio_type = chunk_server.get_param().get_write_sstable_io_type();
+        bool dio = false;
+        if (dio_type > 0)
+        {
+          dio = true;
+        }
+        writer_.set_dio(dio);
       }
 
       return ret;
@@ -898,7 +990,8 @@ namespace oceanbase
         const ExpireColumnInfo & expire_column_info,
         const int64_t split_row_pos,
         const int64_t tablet_after_merge,
-        ExpireRowFilter& expire_row_filter)
+        ExpireRowFilter& expire_row_filter,
+        bool &is_tablet_splited)
     {
       int ret = OB_SUCCESS;
       RowStatus row_status = ROW_START;
@@ -908,6 +1001,8 @@ namespace oceanbase
       bool current_row_expired = false;
       int64_t expire_row_num = 0;
       int64_t merge_mem_limit = THE_CHUNK_SERVER.get_param().get_merge_mem_limit();
+
+      is_tablet_splited = false;
 
       TBSYS_LOG(INFO,"column group %lu", column_group_id);
 
@@ -970,12 +1065,24 @@ namespace oceanbase
            */
           if ((ROW_GROWING == row_status && is_row_changed))
           {
-            if (0 == (row_num_ % CHECK_LOAD_LINE_INTERVAL) )
+            if (0 == (row_num_ % chunk_merge_.merge_pause_row_count_) )
             {
+              if (chunk_merge_.merge_pause_sleep_time_ > 0)
+              {
+                if (0 == (row_num_ % (chunk_merge_.merge_pause_row_count_ * 20)))
+                {
+                  // print log every sleep 20 times;
+                  TBSYS_LOG(INFO,"pause in merging,sleep %ld", 
+                      chunk_merge_.merge_pause_sleep_time_);
+                }
+                usleep(chunk_merge_.merge_pause_sleep_time_);
+              }
+
               while( !chunk_merge_.check_load() )
               {
-                TBSYS_LOG(INFO,"load is too high in merging,sleep 1s");
-                usleep(1000000); //1s
+                TBSYS_LOG(INFO,"load is too high in merging,sleep %ld", 
+                    chunk_merge_.merge_highload_sleep_time_);
+                usleep(chunk_merge_.merge_highload_sleep_time_);
               }
             }
 
@@ -1000,6 +1107,10 @@ namespace oceanbase
               if ( (ret = update_range_end_key()) != OB_SUCCESS)
               {
                 TBSYS_LOG(ERROR,"update end range error [%d]",ret);
+              }
+              else
+              {
+                is_tablet_splited = true;
               }
               // entercount split point, skip to merge next column group
               // we reset all status whenever start new column group, so
@@ -1076,6 +1187,7 @@ namespace oceanbase
      
       int64_t split_row_pos = tablet->get_row_count();
       int64_t tablet_after_merge = 1;
+      bool    is_tablet_splited = false;
     
    
       if (NULL == tablet || frozen_version <= 0)
@@ -1194,7 +1306,7 @@ namespace oceanbase
             // and test in next merge column group.
             else if ( OB_SUCCESS != ( ret = merge_column_group(
                   column_group_ids[group_index], column_group_num, expire_column_info,
-                  split_row_pos, tablet_after_merge, expire_row_filter)) )
+                  split_row_pos, tablet_after_merge, expire_row_filter, is_tablet_splited)) )
             {
               TBSYS_LOG(ERROR, "merge column group[%ld] = %ld , group num = %ld,"
                   "split_row_pos = %ld tablet_after_merge=%ld error.", 
@@ -1206,6 +1318,16 @@ namespace oceanbase
               TBSYS_LOG(ERROR, "check row count column group[%ld] = %ld", 
                   group_index, column_group_ids[group_index]);
             }
+
+            // tablet should split, but rows with same rowkey[0,split_pos-1] cannot store
+            // in difference tablets, if this kind of row is the last row of current tablet
+            // so give up split action, CAUTION, only first column group can split.
+            if (group_index == 0 && (!is_tablet_splited) && tablet_after_merge > 1)
+            {
+              TBSYS_LOG(INFO, "this tablet should split to %d tablets, but split rule stop that.", tablet_after_merge);
+              tablet_after_merge = 0;
+            }
+
             // reset for next column group..
             // page arena reuse avoid memory explosion
             reset_for_next_column_group();
@@ -1355,12 +1477,6 @@ namespace oceanbase
           TBSYS_LOG(INFO,"dest sstable_path:%s\n",path_);
           path_string_.assign_ptr(path_,strlen(path_) + 1);
 
-          char old_sstable[OB_MAX_FILE_NAME_LENGTH];
-          if ( OB_SUCCESS == chunk_merge_.expired_sstable_pool_.get_expired_sstable(disk_no,old_sstable,sizeof(old_sstable)))
-          {
-            rename(old_sstable,path_);
-          }
-
           if ((ret = writer_.create_sstable(sstable_schema_,path_string_,compressor_string_,frozen_version_)) != OB_SUCCESS)
           {
             if (OB_IO_ERROR == ret)
@@ -1385,6 +1501,17 @@ namespace oceanbase
        * and just read frozen mem table.
        */
       scan_param_.set_is_result_cached(false); 
+      scan_param_.set_is_read_consistency(false);
+
+      int64_t preread_mode = THE_CHUNK_SERVER.get_param().get_merge_scan_use_preread();
+      if ( 0 == preread_mode )
+      {
+        scan_param_.set_read_mode(ObScanParam::SYNCREAD);
+      }
+      else
+      {
+        scan_param_.set_read_mode(ObScanParam::PREREAD);
+      }
 
       ObVersionRange version_range;
       version_range.border_flag_.set_inclusive_end();

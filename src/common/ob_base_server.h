@@ -82,7 +82,7 @@ namespace oceanbase
         int send_response(const int32_t pcode, const int32_t version, const ObDataBuffer& buffer, tbnet::Connection* connection, const int32_t channel_id);
 
       protected:
-        bool stoped_;
+        volatile bool stoped_;
         int thread_count_;
         bool batch_;
         char dev_name_[DEV_NAME_LENGTH];

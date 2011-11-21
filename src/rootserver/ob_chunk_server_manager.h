@@ -19,10 +19,29 @@
 #include "common/ob_array_helper.h"
 #include "common/ob_server.h"
 #include "rootserver/ob_server_balance_info.h"
+#include "rootserver/ob_migrate_info.h"
 namespace oceanbase 
 { 
   namespace rootserver 
   {
+    struct ObBalanceInfo
+    {      
+      /// total size of all sstables for one particular table in this CS
+      int64_t table_sstable_total_size_;
+      /// total count of all sstables for one particular table in this CS
+      int64_t table_sstable_count_;
+      /// the count of currently migrate-in tablets
+      int32_t curr_migrate_in_num_;
+      /// the count of currently migrate-out tablets
+      int32_t curr_migrate_out_num_;
+      ObCsMigrateTo migrate_to_;
+      
+      ObBalanceInfo();
+      ~ObBalanceInfo();
+      void reset();
+      void reset_for_table();
+    };
+    
     const int64_t CHUNK_LEASE_DURATION = 1000000;         
     const int16_t CHUNK_SERVER_MAGIC = 0xCDFF;
     /* schema 切换过程与 Sever的状态
@@ -70,7 +89,8 @@ namespace oceanbase
       bool is_alive(int64_t now, int64_t lease) const;
       bool is_ms_alive(int64_t now, int64_t lease) const;
       void dump(const int32_t index) const;
-
+      const char* get_cs_stat_str() const;
+      
       common::ObServer server_;
       volatile int64_t last_hb_time_;
       volatile int64_t last_hb_time_ms_;  //the last hb time of mergeserver,for compatible,we don't serialize this field
@@ -80,11 +100,11 @@ namespace oceanbase
       int32_t port_cs_; //chunk server port
       int32_t port_ms_; //merger server port
 
-      int64_t migrate_in_finish_time_;   //only be used in migrating, no need serialize
-      int64_t migrate_out_finish_time_; //only be used in migrating, no need serialize
       int32_t hb_retry_times_;        //no need serialize
 
       ObServerDiskInfo disk_info_; //chunk server disk info
+      //used in the new rebalance algorithm, don't serialize
+      ObBalanceInfo balance_info_;
     };
     class ObChunkServerManager
     {
@@ -120,15 +140,24 @@ namespace oceanbase
         bool can_migrate_in(const int32_t index, const int64_t occupy_size, const ObBalancePrameter*) const;
         void set_server_down(iterator& it);
         void set_server_down_ms(iterator& it);
+        void reset_balance_info(int32_t max_migrate_out_per_cs);
+        void reset_balance_info_for_table(int32_t &cs_num);
+        bool is_migrate_infos_full() const;
+        int add_migrate_info(ObServerStatus& cs, const common::ObRange &range, int32_t dest_cs_idx);
+        int add_copy_info(ObServerStatus& cs, const common::ObRange &range, int32_t dest_cs_idx);
         NEED_SERIALIZE_AND_DESERIALIZE;
-
+        ObChunkServerManager& operator= (const ObChunkServerManager& other);
+        int serialize_cs(const ObServerStatus *it, char* buf, const int64_t buf_len, int64_t& pos) const;
+        int serialize_ms(const ObServerStatus *it, char* buf, const int64_t buf_len, int64_t& pos) const;
+        int serialize_cs_list(char* buf, const int64_t buf_len, int64_t& pos) const;
+        int serialize_ms_list(char* buf, const int64_t buf_len, int64_t& pos) const;
       public:
         int write_to_file(const char* filename);
-        int read_from_file(const char* filename);
-
+        int read_from_file(const char* filename, int32_t &cs_num, int32_t &ms_num);
       private:
         ObServerStatus data_holder_[MAX_SERVER_COUNT];
         common::ObArrayHelper<ObServerStatus> servers_;
+        ObMigrateInfos migrate_infos_;
     };
   }
 }

@@ -280,7 +280,25 @@ namespace oceanbase
       *str = 0;
       return sa;
     }
-    
+
+void databuff_printf(char *buf, const int64_t buf_len, int64_t& pos, const char* fmt, ...)
+{
+  if (NULL != buf && 0 <= pos && pos <= buf_len)
+  {
+    va_list args;
+    va_start(args, fmt);
+    int len = vsnprintf(buf+pos, buf_len-pos, fmt, args);
+    if (len < buf_len-pos)
+    {
+      pos += len;
+    }
+    else
+    {
+      pos = buf_len;
+    }
+  }
+}
+
   } // end namespace common
 } // end namespace oceanbase
 

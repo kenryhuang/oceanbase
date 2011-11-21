@@ -58,7 +58,8 @@ namespace oceanbase
       OB_RT_DROP_CURRENT_BUILD = 419,
       OB_RT_DROP_LAST_CS_DURING_MERGE = 420,
       OB_RT_SYNC_FROZEN_VERSION = 421,
-
+      OB_RT_SET_UPS_LIST = 422,
+      OB_RT_SET_CLIENT_CONFIG = 423,
       //// ChunkServer ... 600 - 799 ////
 
       //// Base command ... ////

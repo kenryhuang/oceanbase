@@ -16,12 +16,17 @@
 #include "common/compress/ob_compressor.h"
 #include "common/ob_thread_mempool.h"
 #include "ob_update_server_param.h"
+#include "ob_update_server_main.h"
 
 namespace
 {
   const char* OBUPS_UPS_SECTION  = "update_server";
   const char* OBUPS_VIP = "vip";
   const char* OBUPS_PORT = "port";
+  const char* OBUPS_INST_MASTER_IP = "instance_master_ip";
+  const char* OBUPS_INST_MASTER_PORT = "instance_master_port";
+  const char* OBUPS_LSYNC_IP = "lsync_ip";
+  const char* OBUPS_LSYNC_PORT = "lsync_port";
   const char* OBUPS_DEVNAME = "dev_name";
   const char* OBUPS_APP_NAME = "app_name";
   const char* OBUPS_LOG_DIR_PATH = "log_dir_path";
@@ -49,8 +54,10 @@ namespace
   const char* OBUPS_LEASE_INTERVAL_US = "lease_interval_us";
   const char* OBUPS_LEASE_RESERVED_TIME_US = "lease_reserved_time_us";
   const char* OBUPS_LEASE_ON = "lease_on";
+  const char* OBUPS_SLAVE_FAIL_WAIT_LEASE_ON = "slave_fail_wait_lease_on";
   const char* OBUPS_LOG_SYNC_TIMEOUT_US = "log_sync_timeout_us";
   const char* OBUPS_PACKET_MAX_TIMEWAIT = "packet_max_timewait";
+  const char* OBUPS_LSYNC_FETCH_TIMEOUT = "lsync_fetch_timeout";
   const char* OBUPS_MAX_THREAD_MEMBLOCK_NUM = "max_thread_memblock_num";
   const char* OBUPS_LOG_FETCH_OPTION = "log_fetch_option";
   const char* OBUPS_TRANS_PROC_TIME_WARN_US = "transaction_process_time_warning_us";
@@ -70,6 +77,10 @@ namespace
   const char* OBUPS_MAJOR_FREEZE_DUTY_TIME_FROMAT = "%H:%M";
   const char* OBUPS_MIN_MAJOR_FREEZE_INTERVAL_S = "min_major_freeze_interval_s";
   const char* OBUPS_REPLAY_CHECKSUM_FLAG = "replay_checksum_flag";
+  const char *OBUPS_MAX_ROW_CELL_NUM = "max_row_cell_num";
+  const char *OBUPS_TABLE_AVAILABLE_WARN_SIZE_GB = "table_available_warn_size_gb";
+  const char *OBUPS_TABLE_AVAILABLE_ERROR_SIZE_GB = "table_available_error_size_gb";
+  const char *OBUPS_WARM_UP_TIME_S= "warm_up_time_s";
 
   const char* OBUPS_RS_SECTION  = "root_server";
 
@@ -82,9 +93,8 @@ namespace
   const char* OBUPS_UPS_INNER_PORT = "ups_inner_port";
   const char* OBUPS_LOW_PRIV_NETWORK_LOWER_LIMIT = "low_priv_network_lower_limit";
   const char* OBUPS_LOW_PRIV_NETWORK_UPPER_LIMIT = "low_priv_network_upper_limit";
-  const char* OBUPS_HIGH_PRIV_MAX_WAIT_TIME_US = "high_priv_max_wait_time_us";
-  const char* OBUPS_HIGH_PRIV_ADJUST_TIME_US = "high_priv_adjust_time_us";
-  const char* OBUPS_HIGH_PRIV_WAIT_TIME_US = "high_priv_wait_time_us";
+  const char* OBUPS_LOW_PRIV_ADJUST_FLAG = "low_priv_adjust_flag";
+  const char* OBUPS_LOW_PRIV_CUR_PERCENT = "low_priv_cur_percent";
 }
 
 namespace oceanbase
@@ -97,6 +107,7 @@ namespace oceanbase
     {
       memset(this, 0x00, sizeof(*this));
       memset(&major_freeze_duty_time_, -1, sizeof(major_freeze_duty_time_));
+      memset(ups_inst_master_ip_, 0x00, sizeof(ups_inst_master_ip_));
     }
 
     ObUpdateServerParam::~ObUpdateServerParam()
@@ -181,6 +192,28 @@ namespace oceanbase
       {
         err = load_string(ups_vip_, OB_MAX_IP_SIZE, OBUPS_UPS_SECTION,
             OBUPS_VIP, true);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = load_string(ups_inst_master_ip_, OB_MAX_IP_SIZE, OBUPS_UPS_SECTION,
+            OBUPS_INST_MASTER_IP, false);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        ups_inst_master_port_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_INST_MASTER_PORT, 0);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = load_string(lsync_ip_, OB_MAX_IP_SIZE, OBUPS_UPS_SECTION,
+            OBUPS_LSYNC_IP, false);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        lsync_port_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_LSYNC_PORT, 0);
       }
 
       if (OB_SUCCESS == err)
@@ -306,8 +339,20 @@ namespace oceanbase
 
       if (OB_SUCCESS == err)
       {
+        lsync_fetch_timeout_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_LSYNC_FETCH_TIMEOUT,
+            DEFAULT_LSYNC_FETCH_TIMEOUT);
+      }
+
+      if (OB_SUCCESS == err)
+      {
         lease_on_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_LEASE_ON,
             DEFAULT_LEASE_ON);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        slave_fail_wait_lease_on_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION,
+            OBUPS_SLAVE_FAIL_WAIT_LEASE_ON, DEFAULT_SLAVE_FAIL_WAIT_LEASE_ON);
       }
 
       if (OB_SUCCESS == err)
@@ -382,8 +427,7 @@ namespace oceanbase
 
       if (OB_SUCCESS == err)
       {
-        frozen_mem_limit_gb_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_FROZEN_MEM_LIMIT_GB,
-            DEFAULT_FROZEN_MEM_LIMIT_GB);
+        TBSYS_LOG(INFO, "will not parse %s", OBUPS_FROZEN_MEM_LIMIT_GB);
       }
 
       if (OB_SUCCESS == err)
@@ -427,6 +471,32 @@ namespace oceanbase
 
       if (OB_SUCCESS == err)
       {
+        max_row_cell_num_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_MAX_ROW_CELL_NUM,
+            DEFAULT_MAX_ROW_CELL_NUM);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        table_available_warn_size_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_TABLE_AVAILABLE_WARN_SIZE_GB,
+            DEFAULT_TABLE_AVAILABLE_WARN_SIZE_GB);
+        table_available_warn_size_ *= GB_UNIT;
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        table_available_error_size_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_TABLE_AVAILABLE_ERROR_SIZE_GB,
+            DEFAULT_TABLE_AVAILABLE_ERROR_SIZE_GB);
+        table_available_error_size_ *= GB_UNIT;
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        warm_up_conf_.warm_up_time_s = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_WARM_UP_TIME_S,
+            CacheWarmUpConf::DEFAULT_WARM_UP_TIME_S);
+      }
+
+      if (OB_SUCCESS == err)
+      {
         err = load_string(fetch_opt_, sizeof(fetch_opt_),
             OBUPS_UPS_SECTION, OBUPS_LOG_FETCH_OPTION, false);
         if (OB_SUCCESS == err)
@@ -454,12 +524,10 @@ namespace oceanbase
             DEFAULT_LOW_PRIV_NETWORK_LOWER_LIMIT);
         low_priv_network_upper_limit_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_LOW_PRIV_NETWORK_UPPER_LIMIT,
             DEFAULT_LOW_PRIV_NETWORK_UPPER_LIMIT);
-        high_priv_max_wait_time_us_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_HIGH_PRIV_MAX_WAIT_TIME_US,
-            DEFAULT_HIGH_PRIV_MAX_WAIT_TIME_US);
-        high_priv_adjust_time_us_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_HIGH_PRIV_ADJUST_TIME_US,
-            DEFAULT_HIGH_PRIV_ADJUST_TIME_US);
-        high_priv_wait_time_us_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_HIGH_PRIV_WAIT_TIME_US,
-            DEFAULT_HIGH_PRIV_WAIT_TIME_US);
+        low_priv_cur_percent_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_LOW_PRIV_CUR_PERCENT,
+            DEFAULT_LOW_PRIV_CUR_PERCENT);
+        low_priv_adjust_flag_ = TBSYS_CONFIG.getInt(OBUPS_UPS_SECTION, OBUPS_LOW_PRIV_ADJUST_FLAG,
+            DEFAULT_LOW_PRIV_ADJUST_FLAG);
       }
 
       if (OB_SUCCESS == err)
@@ -475,11 +543,18 @@ namespace oceanbase
 
       if (OB_SUCCESS == err)
       {
-        int64_t table_total = (active_mem_limit_gb_ + frozen_mem_limit_gb_) * GB_UNIT;
-        if (table_total >= table_memory_limit_)
+        if ((active_mem_limit_gb_ * GB_UNIT) >= table_memory_limit_)
         {
-          TBSYS_LOG(WARN, "active_mem_limit + frozen_mem_limit %ld cannot larger than table_memory_limit=%ld",
-                    table_total, table_memory_limit_);
+          TBSYS_LOG(WARN, "active_mem_limit=%ld cannot larger than table_memory_limit=%ld",
+                    active_mem_limit_gb_, table_memory_limit_ / GB_UNIT);
+          err = OB_INVALID_ARGUMENT;
+        }
+      }
+      
+      if (OB_SUCCESS == err)
+      {
+        if (!warm_up_conf_.check())
+        {
           err = OB_INVALID_ARGUMENT;
         }
       }
@@ -497,8 +572,6 @@ namespace oceanbase
       config_file_str[length] = '\0';
 
       tbsys::CConfig config;
-      int64_t tmp_active_mem_limit = active_mem_limit_gb_;
-      int64_t tmp_frozen_mem_limit = frozen_mem_limit_gb_;
 
       if(config.load(config_file_str)) 
       {
@@ -508,33 +581,56 @@ namespace oceanbase
 
       if (OB_SUCCESS == err)
       {
-        // reload vip
-        const char* value = config.getString(OBUPS_UPS_SECTION, OBUPS_VIP);
-        strncpy(ups_vip_, value, OB_MAX_IP_SIZE);
-        ups_vip_[OB_MAX_IP_SIZE - 1] = '\0';
+        int64_t tmp_active_mem_limit = config.getInt(OBUPS_UPS_SECTION, OBUPS_ACTIVE_MEM_LIMIT_GB, DEFAULT_ACTIVE_MEM_LIMIT_GB);
+        int64_t tmp_total_memory_limit = config.getInt(OBUPS_UPS_SECTION, OBUPS_TOTAL_MEMORY_LIMIT, DEFAULT_TOTAL_MEMORY_LIMIT);
+        tmp_total_memory_limit *= GB_UNIT;
+        int64_t tmp_table_memory_limit = config.getInt(OBUPS_UPS_SECTION, OBUPS_TABLE_MEMORY_LIMIT, DEFAULT_TABLE_MEMORY_LIMIT);
+        tmp_table_memory_limit *= GB_UNIT;
 
-        TBSYS_LOG(INFO, "new_vip=%s", ups_vip_);
-      }
+        int64_t mem_total = (blockcache_size_mb_ + blockindex_cache_size_mb_) * MB_UNIT + tmp_table_memory_limit;
 
-      if (OB_SUCCESS == err)
-      {
-        tmp_active_mem_limit = config.getInt(OBUPS_UPS_SECTION, OBUPS_ACTIVE_MEM_LIMIT_GB,
-            DEFAULT_ACTIVE_MEM_LIMIT_GB);
-        tmp_frozen_mem_limit = config.getInt(OBUPS_UPS_SECTION, OBUPS_FROZEN_MEM_LIMIT_GB,
-            DEFAULT_FROZEN_MEM_LIMIT_GB);
-        int64_t table_total = (tmp_active_mem_limit + tmp_frozen_mem_limit) * GB_UNIT;
-        if (table_total >= table_memory_limit_)
+        if (mem_total >= tmp_total_memory_limit)
         {
-          TBSYS_LOG(WARN, "active_mem_limit + frozen_mem_limit %ld cannot larger than table_memory_limit=%ld",
-                    table_total, table_memory_limit_);
+          TBSYS_LOG(WARN, "blockcache_size + blockindex_cache + table_memory_limit %ld cannot larger than total_memory_limit=%ld",
+                    mem_total, tmp_total_memory_limit);
+          err = OB_INVALID_ARGUMENT;
         }
-        else
+
+        if ((tmp_active_mem_limit * GB_UNIT) >= tmp_table_memory_limit)
         {
-          TBSYS_LOG(INFO, "active_mem_limit switch from %ld to %ld, frozen_mem_limit switch from %ld to %ld",
+          TBSYS_LOG(WARN, "active_mem_limit=%ld cannot larger than table_memory_limit=%ld",
+                    tmp_active_mem_limit, tmp_table_memory_limit / GB_UNIT);
+          err = OB_INVALID_ARGUMENT;
+        }
+
+        TBSYS_LOG(INFO, "will not parse %s", OBUPS_FROZEN_MEM_LIMIT_GB);
+        if (OB_SUCCESS == err)
+        {
+          TBSYS_LOG(INFO, "active_mem_limit switch from %ld to %ld, "
+                    "total_memory_limit switch from %ld to %ld, "
+                    "table_memory_limit switch from %ld to %ld",
                     active_mem_limit_gb_, tmp_active_mem_limit,
-                    frozen_mem_limit_gb_, tmp_frozen_mem_limit);
+                    total_memory_limit_ / GB_UNIT, tmp_total_memory_limit / GB_UNIT,
+                    table_memory_limit_ / GB_UNIT, tmp_table_memory_limit / GB_UNIT);
           active_mem_limit_gb_ = tmp_active_mem_limit;
-          frozen_mem_limit_gb_ = tmp_frozen_mem_limit;
+          total_memory_limit_ = tmp_total_memory_limit;
+          table_memory_limit_ = tmp_table_memory_limit;
+
+          ob_set_memory_size_limit(total_memory_limit_);
+          ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+          if (NULL == ups_main)
+          {
+            TBSYS_LOG(WARN, "get updateserver main fail");
+          }
+          else
+          {
+            MemTableAttr memtable_attr;
+            if (OB_SUCCESS == ups_main->get_update_server().get_table_mgr().get_memtable_attr(memtable_attr))
+            {
+              memtable_attr.total_memlimit = table_memory_limit_;
+              ups_main->get_update_server().get_table_mgr().set_memtable_attr(memtable_attr);
+            }
+          }
         }
       }
 
@@ -564,7 +660,8 @@ namespace oceanbase
 
       if (OB_SUCCESS == err)
       {
-        err = load_string(sstable_compressor_name_, OB_MAX_FILE_NAME_LENGTH, OBUPS_UPS_SECTION, OBUPS_SSTABLE_COMPRESSOR_NAME, true);
+        err = load_string(sstable_compressor_name_, OB_MAX_FILE_NAME_LENGTH, OBUPS_UPS_SECTION,
+                          OBUPS_SSTABLE_COMPRESSOR_NAME, true, &config);
         if (OB_SUCCESS == err)
         {
           ObCompressor *compressor = create_compressor(sstable_compressor_name_);
@@ -596,10 +693,116 @@ namespace oceanbase
         const char *str = config.getString(OBUPS_UPS_SECTION, OBUPS_MAJOR_FREEZE_DUTY_TIME);
         if (NULL != str)
         {
-          strptime(str, OBUPS_MAJOR_FREEZE_DUTY_TIME_FROMAT, &major_freeze_duty_time_);
+          if (NULL == strptime(str, OBUPS_MAJOR_FREEZE_DUTY_TIME_FROMAT, &major_freeze_duty_time_))
+          {
+            memset(&major_freeze_duty_time_, -1, sizeof(major_freeze_duty_time_));
+          }
         }
         TBSYS_LOG(INFO, "major_freeze_duty_time switch from [%d:%d] to [%d:%d]",
                   old_value_hour, old_value_min, major_freeze_duty_time_.tm_hour, major_freeze_duty_time_.tm_min);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        int64_t old_value = max_row_cell_num_;
+        max_row_cell_num_ = config.getInt(OBUPS_UPS_SECTION, OBUPS_MAX_ROW_CELL_NUM,
+            DEFAULT_MAX_ROW_CELL_NUM);
+        TBSYS_LOG(INFO, "max_row_cell_num switch from %ld to %ld", old_value, max_row_cell_num_);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        int64_t tmp_table_available_warn_size_gb = config.getInt(OBUPS_UPS_SECTION, OBUPS_TABLE_AVAILABLE_WARN_SIZE_GB,
+            DEFAULT_TABLE_AVAILABLE_WARN_SIZE_GB);
+        tmp_table_available_warn_size_gb *= GB_UNIT;
+        TBSYS_LOG(INFO, "table_available_warn_size switch from %ld to %ld",
+                  table_available_warn_size_ / GB_UNIT, tmp_table_available_warn_size_gb / GB_UNIT);
+        table_available_warn_size_ = tmp_table_available_warn_size_gb;
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        int64_t tmp_table_available_error_size_gb = config.getInt(OBUPS_UPS_SECTION, OBUPS_TABLE_AVAILABLE_ERROR_SIZE_GB,
+            DEFAULT_TABLE_AVAILABLE_ERROR_SIZE_GB);
+        tmp_table_available_error_size_gb *= GB_UNIT;
+        TBSYS_LOG(INFO, "table_available_error_size switch from %ld to %ld",
+                  table_available_error_size_ / GB_UNIT, tmp_table_available_error_size_gb / GB_UNIT);
+        table_available_error_size_ = tmp_table_available_error_size_gb;
+      }
+
+      CacheWarmUpConf tmp_warm_up_conf;
+      if (OB_SUCCESS == err)
+      {
+        tmp_warm_up_conf.warm_up_time_s = config.getInt(OBUPS_UPS_SECTION, OBUPS_WARM_UP_TIME_S,
+            CacheWarmUpConf::DEFAULT_WARM_UP_TIME_S);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        char tmp_lsync_ip[OB_MAX_IP_SIZE];
+        err = load_string(tmp_lsync_ip, OB_MAX_IP_SIZE, OBUPS_UPS_SECTION,
+            OBUPS_LSYNC_IP, false, &config);
+        TBSYS_LOG(INFO, "lsync server ip addr switch from [%s] to [%s]", lsync_ip_, tmp_lsync_ip);
+        snprintf(lsync_ip_, OB_MAX_IP_SIZE, "%s", tmp_lsync_ip);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        int tmp_lsync_port = config.getInt(OBUPS_UPS_SECTION, OBUPS_LSYNC_PORT, 0);
+        TBSYS_LOG(INFO, "lsync server port addr switch from [%d] to [%d]", lsync_port_, tmp_lsync_port);
+        lsync_port_ = tmp_lsync_port;
+      }
+
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(WARN, "get updateserver main fail");
+      }
+      else
+      {
+        ups_main->get_update_server().set_lsync_server(lsync_ip_, lsync_port_);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        if (!tmp_warm_up_conf.check())
+        {
+          err = OB_INVALID_ARGUMENT;
+        }
+        if (OB_SUCCESS == err)
+        {
+          TBSYS_LOG(INFO, "warm_up_time_s switch from %ld to %ld",
+                    warm_up_conf_.warm_up_time_s, tmp_warm_up_conf.warm_up_time_s);
+          TBSYS_LOG(INFO, "warm_up_step_interval_us switch from %ld to %ld",
+                    warm_up_conf_.warm_up_step_interval_us, tmp_warm_up_conf.warm_up_step_interval_us);
+          warm_up_conf_ = tmp_warm_up_conf;
+        }
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        int64_t ori_lower_limit = low_priv_network_lower_limit_;
+        int64_t ori_upper_limit = low_priv_network_upper_limit_;
+        int64_t ori_adjust_flag = low_priv_adjust_flag_;
+        int64_t ori_cur_percent = low_priv_cur_percent_;
+
+        low_priv_network_lower_limit_ = config.getInt(OBUPS_UPS_SECTION, OBUPS_LOW_PRIV_NETWORK_LOWER_LIMIT,
+            ori_lower_limit);
+        low_priv_network_upper_limit_ = config.getInt(OBUPS_UPS_SECTION, OBUPS_LOW_PRIV_NETWORK_UPPER_LIMIT,
+            ori_upper_limit);
+        low_priv_adjust_flag_ = config.getInt(OBUPS_UPS_SECTION, OBUPS_LOW_PRIV_ADJUST_FLAG,
+            ori_adjust_flag);
+        low_priv_cur_percent_ = config.getInt(OBUPS_UPS_SECTION, OBUPS_LOW_PRIV_CUR_PERCENT,
+            ori_cur_percent);
+
+        TBSYS_LOG(INFO, "low_priv_network_lower_limit switch from [%ld] to [%ld]",
+            ori_lower_limit, low_priv_network_lower_limit_);
+        TBSYS_LOG(INFO, "low_priv_network_upper_limit switch from [%ld] to [%ld]",
+            ori_upper_limit, low_priv_network_upper_limit_);
+        TBSYS_LOG(INFO, "low_priv_adjust_flag switch from [%ld] to [%ld]",
+            ori_adjust_flag, low_priv_adjust_flag_);
+        TBSYS_LOG(INFO, "low_priv_cur_percent switch from [%ld] to [%ld]",
+            ori_cur_percent, low_priv_cur_percent_);
       }
 
       return err;
@@ -656,7 +859,7 @@ namespace oceanbase
     }
 
     int ObUpdateServerParam::load_string(char* dest, const int32_t size,
-        const char* section, const char* name, bool not_null)
+        const char* section, const char* name, bool not_null, tbsys::CConfig *config)
     {
       int ret = OB_SUCCESS;
       if (NULL == dest || 0 >= size || NULL == section || NULL == name)
@@ -668,7 +871,14 @@ namespace oceanbase
       const char* value = NULL;
       if (OB_SUCCESS == ret)
       {
-        value = TBSYS_CONFIG.getString(section, name);
+        if (NULL == config)
+        {
+          value = TBSYS_CONFIG.getString(section, name);
+        }
+        else
+        {
+          value = config->getString(section, name);
+        }
         if (not_null && (NULL == value || 0 >= strlen(value)))
         {
           TBSYS_LOG(ERROR, "%s.%s has not been set.", section, name);
@@ -686,7 +896,7 @@ namespace oceanbase
         }
         else
         {
-          strncpy(dest, value, strlen(value));
+          strncpy(dest, value, strlen(value) + 1);
         }
       }
 

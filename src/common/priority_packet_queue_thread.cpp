@@ -7,13 +7,15 @@
  * 
  * Version: $Id$
  *
- * priority_packet_queue_thread.cpp for ...
+ * ob_common_param.cpp for ...
  *
  * Authors:
- *   rizhao <rizhao.ych@taobao.com>
+ *    chuanhui <rizhao.ych@taobao.com>
  *
  */
+
 #include "priority_packet_queue_thread.h"
+#include "ob_probability_random.h"
 
 using namespace tbnet;
 
@@ -27,13 +29,15 @@ PriorityPacketQueueThread::PriorityPacketQueueThread() : tbsys::CDefaultRunnable
   _waitFinish = false;
   _handler = NULL;
   _args = NULL;
-  _waitTime[NORMAL_PRIV] = DEF_WAIT_TIME_MS;
-  _waitTime[LOW_PRIV] = 0;
   for (int64_t i = 0; i < QUEUE_NUM; ++i)
   {
     _waiting[i] = false;
     _queues[i].init();
   }
+
+  _percent[LOW_PRIV] = 10;
+  _percent[NORMAL_PRIV] = 90;
+  _sum = 100;
 }
 
 // 构造
@@ -44,12 +48,14 @@ PriorityPacketQueueThread::PriorityPacketQueueThread(int threadCount, IPacketQue
   _waitFinish = false;
   _handler = handler;
   _args = args;
-  _waitTime[NORMAL_PRIV] = DEF_WAIT_TIME_MS;
-  _waitTime[LOW_PRIV] = 0;
   for (int64_t i = 0; i < QUEUE_NUM; ++i)
   {
     _waiting[i] = false;
   }
+
+  _percent[LOW_PRIV] = 10;
+  _percent[NORMAL_PRIV] = 90;
+  _sum = 100;
 }
 
 // 析构
@@ -81,11 +87,13 @@ bool PriorityPacketQueueThread::push(ObPacket *packet, int maxQueueLen, bool blo
   // invalid param
   if (NULL == packet)
   {
-    return true;
+    TBSYS_LOG(WARN, "packet is NULL");
+    return false;
   }
   else if (priority != NORMAL_PRIV && priority != LOW_PRIV)
   {
-    return true;
+    TBSYS_LOG(WARN, "invalid param, priority=%d", priority);
+    return false;
   }
 
   // 是停止就不允许放了
@@ -124,69 +132,75 @@ bool PriorityPacketQueueThread::push(ObPacket *packet, int maxQueueLen, bool blo
   return true;
 }
 
+ObPacket* PriorityPacketQueueThread::pop_packet_(const int64_t priority)
+{
+  ObPacket* packet = NULL;
+
+  _cond[priority].lock();
+  // 取出packet
+  packet = _queues[priority].pop();
+  _cond[priority].unlock();
+
+  // push 在等吗?
+  if (NULL != packet && _waiting[priority])
+  {
+    _pushcond[priority].lock();
+    _pushcond[priority].signal();
+    _pushcond[priority].unlock();
+  }
+
+  return packet;
+}
+
 // Runnable 接口
 void PriorityPacketQueueThread::run(tbsys::CThread *, void *)
 {
   Packet *packet = NULL;
-  int64_t priority = NORMAL_PRIV;
-  int64_t continous_normal_task = 0;
+  int64_t priority = -1;
+  static const int64_t TASK_WAIT_TIME = 1; // wait 1ms if there is no task
 
   while (!_stop)
   {
-    _cond[priority].lock();
-    if (!_stop && _queues[priority].size() == 0 && _waitTime[priority] > 0)
+    if (_queues[NORMAL_PRIV].size() == 0)
     {
-      _cond[priority].wait(_waitTime[priority]);
-    }
-    if (_stop)
-    {
-      _cond[priority].unlock();
-      break;
-    }
-
-    // 取出packet
-    packet = _queues[priority].pop();
-    _cond[priority].unlock();
-
-    // push 在等吗?
-    if (_waiting)
-    {
-      _pushcond[priority].lock();
-      _pushcond[priority].signal();
-      _pushcond[priority].unlock();
-    }
-
-    bool has_task = true;
-    // 空的packet?
-    if (packet == NULL)
-    {
-      has_task = false;
-    }
-    else
-    {
-      bool ret = true;
-      if (_handler)
+      if (_queues[LOW_PRIV].size() == 0) // no task at all
       {
-        ret = _handler->handlePacketQueue(packet, _args);
+        // wait 1ms for normal task
+        _cond[NORMAL_PRIV].lock();
+        _cond[NORMAL_PRIV].wait(TASK_WAIT_TIME);
+        _cond[NORMAL_PRIV].unlock();
+        continue;
       }
-      // 如果返回false, 不删除
-      //if (ret) delete packet;
-    }
-
-    //TBSYS_LOG(DEBUG, "HANDLE task priority=%d has_task=%s", priority, has_task ? "true" : "false");
-    // switch task queue if necessary
-    if (LOW_PRIV == priority)
-    {
-      continous_normal_task = 0;
-      priority = NORMAL_PRIV;
-    }
-    else
-    {
-      ++continous_normal_task;
-      if (!has_task || continous_normal_task >= CONTINOUS_NORMAL_TASK_NUM)
+      else // only low priv queue has task
       {
         priority = LOW_PRIV;
       }
+    }
+    else
+    {
+      if (_queues[LOW_PRIV].size() == 0) // only normal priv queue has task
+      {
+        priority = NORMAL_PRIV;
+      }
+      else
+      {
+        priority = ObStalessProbabilityRandom::random(_percent, QUEUE_NUM, _sum);
+        if (priority >= QUEUE_NUM || priority < 0)
+        {
+          priority = NORMAL_PRIV;
+        }
+      }
+    }
+
+    if (_stop) break;
+
+    packet = pop_packet_(priority);
+    if (packet == NULL) continue;
+
+    // handle packet
+    if (_handler)
+    {
+      _handler->handlePacketQueue(packet, _args);
     }
   }
 
@@ -225,35 +239,6 @@ void PriorityPacketQueueThread::run(tbsys::CThread *, void *)
   }
 }
 
-void PriorityPacketQueueThread::setWaitTime(int normal_priv_ms, int low_priv_ms)
-{
-  int tmp_normal_priv_ms = normal_priv_ms;
-  int tmp_low_priv_ms = low_priv_ms;
-
-  if (tmp_normal_priv_ms > 0 && tmp_low_priv_ms >= 0)
-  {
-    if (tmp_normal_priv_ms > MAX_WAIT_TIME_MS)
-    {
-      tmp_normal_priv_ms = MAX_WAIT_TIME_MS;
-    }
-
-    if (tmp_low_priv_ms > MAX_WAIT_TIME_MS)
-    {
-      tmp_low_priv_ms = MAX_WAIT_TIME_MS;
-    }
-
-    _waitTime[NORMAL_PRIV] = tmp_normal_priv_ms;
-    _waitTime[LOW_PRIV] = tmp_low_priv_ms;
-  }
-}
-
-void PriorityPacketQueueThread::getWaitTime(int& normal_priv_ms, int& low_priv_ms)
-{
-  normal_priv_ms = _waitTime[NORMAL_PRIV];
-  low_priv_ms = _waitTime[LOW_PRIV];
-}
-
 }
 }
-
 

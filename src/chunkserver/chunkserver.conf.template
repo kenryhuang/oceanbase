@@ -26,7 +26,9 @@ merge_mem_limit=67108864
 merge_load_threshold_high=16
 merge_threshold_request_high=3000
 max_merge_thread_num=10
-
+#0 means buffered io
+#>0 means dio
+write_sstable_io_type=0
 [memory_cache]
 block_cache_memsize_mb = 4096
 file_info_cache_max_cache_num = 4096

@@ -1,13 +1,16 @@
 AM_CPPFLAGS= -I${TBLIB_ROOT}/include/tbsys \
 			 -I${TBLIB_ROOT}/include/tbnet \
 			 -I${top_srcdir}/include \
-			 -I${top_srcdir}/src 
+			 -I${top_srcdir}/src
 
 LDADD = ${TBLIB_ROOT}/lib/libtbnet.a \
-				${TBLIB_ROOT}/lib/libtbsys.a 
+				${TBLIB_ROOT}/lib/libtbsys.a
 #CXXFLAGS+=-O2 -Wno-strict-aliasing
-
-AM_LDFLAGS=-O2 -lpthread -lc -lm  -lrt -lnuma
+AM_LDFLAGS=-lpthread -lc -lm  -lrt -lnuma #-pg
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_LIBRARIES = libcommon.a
 
@@ -18,7 +21,7 @@ libcommon_a_SOURCES = dlist.cpp \
 		      ob_schema.cpp \
 		      file_utils.cpp \
 		      file_directory_utils.cpp \
-		      murmur_hash.cpp \
+          murmur_hash.cpp \
 		      ob_merger.cpp \
 		      ob_range.cpp \
 		      ob_string_buf.cpp\
@@ -28,7 +31,8 @@ libcommon_a_SOURCES = dlist.cpp \
 		      ob_single_server.cpp \
 		      ob_simple_filter.cpp \
 		      ob_simple_condition.cpp \
-		      ob_cell_array.cpp \
+		      ob_probability_random.cpp \
+          ob_cell_array.cpp \
 		      ob_scanner.cpp \
 		      ob_scan_param.cpp \
 		      ob_common_param.cpp \
@@ -71,7 +75,13 @@ libcommon_a_SOURCES = dlist.cpp \
 					priority_packet_queue_thread.cpp \
           ob_packet_queue.cpp \
           ob_file.cpp \
-          ob_ring_buffer.cpp
+          ob_ring_buffer.cpp\
+		  ob_obi_role.cpp\
+		  ob_base_client.cpp\
+			ob_obi_config.cpp\
+			ob_ups_info.h ob_ups_info.cpp\
+      ob_row_compaction.cpp\
+			ob_client_config.h ob_client_config.cpp
 
 bin_PROGRAMS = ob_ping
 ob_ping_SOURCES = ob_ping.cpp ${libcommon_a_SOURCES}
@@ -147,6 +157,7 @@ EXTRA_DIST = \
 	utility.h \
 	wait_object.h \
 	hash/ob_hashmap.h \
+	hash/ob_hashset.h \
 	hash/ob_hashtable.h \
 	hash/ob_hashutils.h \
 	hash/ob_serialization.h \
@@ -165,6 +176,7 @@ EXTRA_DIST = \
   ob_string_search.h  \
 	ob_update_condition.h \
 	ob_shadow_server.h\
+  ob_probability_random.h \
   priority_packet_queue_thread.h \
   ob_packet_queue.h \
   ob_ring_buffer.h \
@@ -175,4 +187,11 @@ EXTRA_DIST = \
 	ob_list.h \
 	ob_thread_objpool.h \
 	ob_bitmap.h \
-   ob_file.h
+  ob_file.h\
+	ob_obi_role.h\
+	ob_base_client.h\
+	ob_obi_config.h\
+  ob_row_compaction.h \
+  ob_log_cursor.h
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

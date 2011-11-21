@@ -38,8 +38,8 @@ namespace oceanbase
 
       if (inited_)
       {
-        TBSYS_LOG(INFO, "have inited");
-        ret = OB_ERROR;
+        //TBSYS_LOG(INFO, "have inited");
+        //ret = OB_ERROR;
       }
       else if (OB_SUCCESS != kv_cache_.init(max_mem_size))
       {
@@ -64,6 +64,7 @@ namespace oceanbase
 
     int ObJoinCache::destroy()
     {
+      inited_ = false;
       return kv_cache_.destroy();
     }
 

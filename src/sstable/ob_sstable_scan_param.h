@@ -58,6 +58,10 @@ namespace oceanbase
         {
           return read_mode_ == common::ObScanParam::SYNCREAD;
         }
+        inline int16_t get_read_mode() const
+        {
+          return read_mode_;
+        }
 
 
         int assign(const common::ObScanParam & param);

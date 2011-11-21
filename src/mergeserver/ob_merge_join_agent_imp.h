@@ -49,15 +49,15 @@ namespace oceanbase
       /// @param max_memory_size if the intermediate results take memory size more than this 
       ///   stop process, and continue when user call this function next time
       int set_request_param(const oceanbase::common::ObScanParam &scan_param,
-                            ObUPSCellStream &ups_stream, 
-                            ObUPSCellStream &ups_join_stream, 
-                            const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
-                            const int64_t max_memory_size); 
+        ObUPSCellStream &ups_stream, 
+        ObUPSCellStream &ups_join_stream, 
+        const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
+        const int64_t max_memory_size); 
       int set_request_param(const oceanbase::common::ObGetParam &get_param,
-                            ObUPSCellStream &ups_stream, 
-                            ObUPSCellStream &ups_join_stream, 
-                            const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
-                            const int64_t max_memory_size); 
+        ObUPSCellStream &ups_stream, 
+        ObUPSCellStream &ups_join_stream, 
+        const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
+        const int64_t max_memory_size); 
       /// @fn clear all result stored
       void clear(); 
       /// @fn reset intermediate result
@@ -118,12 +118,12 @@ namespace oceanbase
       int get_next_scan_rpc_result();
       template<typename IteratorT>
       int join_apply(const oceanbase::common::ObCellInfo & cell, 
-                     IteratorT & dst_off_beg, 
-                     IteratorT & dst_off_end);
+        IteratorT & dst_off_beg, 
+        IteratorT & dst_off_end);
       void move_to_next_row(const oceanbase::common::ObGetParam & row_spec_arr,
-                            const int64_t row_spec_arr_size, 
-                            int64_t &cur_row_beg,
-                            int64_t &cur_row_end);
+        const int64_t row_spec_arr_size, 
+        int64_t &cur_row_beg,
+        int64_t &cur_row_end);
     private:
       oceanbase::common::ObCellInfo join_apply_cell_adjusted_;
     };
@@ -149,15 +149,15 @@ namespace oceanbase
       }
       /// @fn set request parameter
       virtual int set_request_param(const oceanbase::common::ObScanParam &scan_param, 
-                                    ObUPSCellStream &ups_stream, 
-                                    ObUPSCellStream &ups_join_stream, 
-                                    const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
-                                    const int64_t max_memory_size) = 0; 
+        ObUPSCellStream &ups_stream, 
+        ObUPSCellStream &ups_join_stream, 
+        const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
+        const int64_t max_memory_size) = 0; 
       virtual int set_request_param(const oceanbase::common::ObGetParam &get_param, 
-                                    ObUPSCellStream &ups_stream, 
-                                    ObUPSCellStream &ups_join_stream, 
-                                    const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
-                                    const int64_t max_memory_size) = 0; 
+        ObUPSCellStream &ups_stream, 
+        ObUPSCellStream &ups_join_stream, 
+        const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
+        const int64_t max_memory_size) = 0; 
       virtual void clear() = 0;
       virtual bool is_request_fullfilled() = 0;
     };
@@ -177,15 +177,15 @@ namespace oceanbase
       virtual int next_cell();
       /// @fn set request parameter
       virtual int set_request_param(const oceanbase::common::ObScanParam &scan_param, 
-                                    ObUPSCellStream &ups_stream, 
-                                    ObUPSCellStream &ups_join_stream, 
-                                    const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
-                                    const int64_t max_memory_size); 
+        ObUPSCellStream &ups_stream, 
+        ObUPSCellStream &ups_join_stream, 
+        const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
+        const int64_t max_memory_size); 
       virtual int set_request_param(const oceanbase::common::ObGetParam &get_param, 
-                                    ObUPSCellStream &ups_stream, 
-                                    ObUPSCellStream &ups_join_stream, 
-                                    const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
-                                    const int64_t max_memory_size); 
+        ObUPSCellStream &ups_stream, 
+        ObUPSCellStream &ups_join_stream, 
+        const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
+        const int64_t max_memory_size); 
       virtual void clear();
       virtual bool is_request_fullfilled();
     private:
@@ -204,21 +204,27 @@ namespace oceanbase
       virtual int get_cell(oceanbase::common::ObCellInfo * *cell, bool *is_row_changed);
       virtual int next_cell();
       virtual int set_request_param(const oceanbase::common::ObScanParam &scan_param, 
-                                    ObUPSCellStream &ups_stream, 
-                                    ObUPSCellStream &ups_join_stream, 
-                                    const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
-                                    const int64_t max_memory_size); 
+        ObUPSCellStream &ups_stream, 
+        ObUPSCellStream &ups_join_stream, 
+        const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
+        const int64_t max_memory_size); 
       virtual int set_request_param(const oceanbase::common::ObGetParam &get_param, 
-                                    ObUPSCellStream &ups_stream, 
-                                    ObUPSCellStream &ups_join_stream, 
-                                    const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
-                                    const int64_t max_memory_size); 
+        ObUPSCellStream &ups_stream, 
+        ObUPSCellStream &ups_join_stream, 
+        const oceanbase::common::ObSchemaManagerV2 &schema_mgr,
+        const int64_t max_memory_size); 
       virtual void clear();
       virtual bool is_request_fullfilled();
+
+      static void set_return_uncomplete_result(bool return_uncomplete_result)
+      {
+        return_uncomplete_result_  = return_uncomplete_result;
+      }
     private:
+      static bool return_uncomplete_result_;
       int filter_org_row_(const oceanbase::common::ObCellArray &cells, const int64_t row_beg,
-                          const int64_t row_end, const oceanbase::common::ObSimpleFilter & filter,
-                          bool &result);
+        const int64_t row_end, const oceanbase::common::ObSimpleFilter & filter,
+        bool &result);
       int jump_limit_offset_(oceanbase::common::ObIterator & cells, const int64_t jump_cell_num);
       int prepare_final_result_();
       int prepare_final_result_process_intermediate_result_();

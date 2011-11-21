@@ -16,6 +16,7 @@
 #include "common/ob_file.h"
 #include "ob_blockcache.h"
 #include "ob_sstable_stat.h"
+#include "ob_sstable_block_index_v2.h"
 
 namespace oceanbase
 {
@@ -143,7 +144,8 @@ namespace oceanbase
       int status          = OB_SUCCESS;
       const char* buffer  = NULL;
       ObDataIndexKey data_index;
-      BlockCacheValue value;
+      BlockCacheValue input_value;
+      BlockCacheValue output_value;
 
       if (!inited_ || NULL == fileinfo_cache_)
       {
@@ -162,10 +164,10 @@ namespace oceanbase
         data_index.offset = offset;
         data_index.size = nbyte;
 
-        if (OB_SUCCESS == kv_cache_.get(data_index, value, buffer_handle.handle_, false))
+        if (OB_SUCCESS == kv_cache_.get(data_index, output_value, buffer_handle.handle_, false))
         {
           buffer_handle.block_cache_ = this;
-          buffer_handle.buffer_ = value.buffer;
+          buffer_handle.buffer_ = output_value.buffer;
           ret = nbyte;
           INC_STAT(table_id, INDEX_BLOCK_CACHE_HIT, 1);
         }
@@ -177,16 +179,16 @@ namespace oceanbase
           {
             INC_STAT(table_id, INDEX_DISK_IO_NUM, 1); 
             INC_STAT(table_id, INDEX_DISK_IO_BYTES, nbyte); 
-            value.nbyte = nbyte;
-            value.buffer = const_cast<char*>(buffer);
-            kv_cache_.put(data_index, value, false); //ignore the return value
+            input_value.nbyte = nbyte;
+            input_value.buffer = const_cast<char*>(buffer);
 
-            //get block from block cache again
-            status = kv_cache_.get(data_index, value, buffer_handle.handle_, false);
+            //put and fetch block from block cache
+            status = kv_cache_.put_and_fetch(data_index, input_value, output_value, 
+                                             buffer_handle.handle_, false, false);
             if (OB_SUCCESS == status)
             {
               buffer_handle.block_cache_ = this;
-              buffer_handle.buffer_ = value.buffer;
+              buffer_handle.buffer_ = output_value.buffer;
               ret = nbyte;
             }
             else
@@ -201,6 +203,149 @@ namespace oceanbase
             TBSYS_LOG(WARN, "read block fail sstable_id=%lu offset=%ld nbyte=%ld",
                       sstable_id, offset, nbyte);
           }
+        }
+      }
+
+      return ret;
+    }
+
+    int32_t ObBlockCache::get_block_readahead(
+        const uint64_t sstable_id,
+        const uint64_t table_id,
+        const ObBlockPositionInfos &block_infos,
+        const int64_t cursor, 
+        const bool is_reverse, 
+        ObBufferHandle &buffer_handle)
+    {
+      int ret = -1;
+      int status = OB_SUCCESS;
+
+      const char* buffer = NULL;
+      ObDataIndexKey data_index;
+      BlockCacheValue input_value;
+      BlockCacheValue output_value;
+
+      if (cursor < 0 || cursor >= block_infos.block_count_)
+      {
+        ret = OB_INVALID_ARGUMENT;
+      }
+      else
+      {
+        // read current block in cache;
+        const ObBlockPositionInfo & current_block = block_infos.position_info_[cursor];
+        data_index.sstable_id = sstable_id;
+        data_index.offset = current_block.offset_;
+        data_index.size = current_block.size_;
+
+        if (OB_SUCCESS == kv_cache_.get(data_index, output_value, buffer_handle.handle_, true))
+        {
+          // found in cache, continue search next block;
+          buffer_handle.block_cache_ = this;
+          buffer_handle.buffer_ = output_value.buffer;
+          ret = data_index.size;
+          INC_STAT(table_id, INDEX_BLOCK_CACHE_HIT, 1);
+        }
+        else
+        {
+          int64_t start_cursor = cursor;
+          int64_t end_cursor = cursor;
+          int64_t readahead_size = 0;
+          int64_t inner_offset = 0;
+          int64_t readahead_offset = 0;
+          int64_t pos = 0;
+          int64_t next_offset = block_infos.position_info_[cursor].offset_;
+
+          // now calculate read ahead offset and size,
+          // need attention reverse scan from down to top.
+          if (!is_reverse)
+          {
+            for (pos = cursor; pos < block_infos.block_count_ && readahead_size < MAX_READ_AHEAD_SIZE; ++pos)
+            {
+              readahead_size += block_infos.position_info_[pos].size_;
+              if (next_offset != block_infos.position_info_[pos].offset_)
+              {
+                TBSYS_LOG(ERROR, "asc: block not continious, current =%ld, acc =%ld, pos=%ld",
+                    block_infos.position_info_[pos].offset_, next_offset, pos);
+                status = OB_ERROR;
+                break;
+              }
+              else
+              {
+                next_offset += block_infos.position_info_[pos].size_;
+              }
+            }
+            end_cursor = pos - 1;
+          }
+          else
+          {
+            for (pos = cursor; pos >= 0 && readahead_size < MAX_READ_AHEAD_SIZE ; --pos)
+            {
+              readahead_size += block_infos.position_info_[pos].size_;
+              if (next_offset != block_infos.position_info_[pos].offset_)
+              {
+                TBSYS_LOG(ERROR, "dsc: block not continious, current =%ld, acc =%ld, pos=%ld",
+                    block_infos.position_info_[pos].offset_, next_offset, pos);
+                status = OB_ERROR;
+                break;
+              }
+              else if (pos > 0)
+              {
+                next_offset -= block_infos.position_info_[pos-1].size_;
+              }
+            }
+            start_cursor = pos + 1;
+          }
+
+
+          if (OB_SUCCESS == status)
+          {
+            readahead_offset = block_infos.position_info_[start_cursor].offset_;
+            status = read_record(*fileinfo_cache_, sstable_id, 
+                readahead_offset, readahead_size, buffer);
+
+            INC_STAT(table_id, INDEX_BLOCK_CACHE_MISS, 1);
+            INC_STAT(table_id, INDEX_DISK_IO_NUM, 1); 
+            INC_STAT(table_id, INDEX_DISK_IO_BYTES, readahead_size); 
+          }
+
+          if (OB_SUCCESS == status && NULL != buffer)
+          {
+            // put all blocks into cache.
+            for (int64_t i = start_cursor; i <= end_cursor; ++i)
+            {
+              data_index.sstable_id = sstable_id;
+              data_index.offset = block_infos.position_info_[i].offset_;
+              data_index.size = block_infos.position_info_[i].size_;
+
+              input_value.nbyte = block_infos.position_info_[i].size_;
+              input_value.buffer = const_cast<char*>(buffer) + inner_offset;
+
+              if (cursor == i)
+              {
+                status = kv_cache_.put_and_fetch(data_index, input_value, 
+                    output_value, buffer_handle.handle_, false, false);
+                if (OB_SUCCESS == status)
+                {
+                  buffer_handle.block_cache_ = this;
+                  buffer_handle.buffer_ = output_value.buffer;
+                  ret = data_index.size;
+                }
+                else
+                {
+                  TBSYS_LOG(WARN, "failed to get block from block cached after put "
+                      "block into block cache, sstable_id=%lu offset=%ld nbyte=%ld",
+                      sstable_id, data_index.offset, data_index.size);
+                }
+              }
+              else
+              {
+                kv_cache_.put(data_index, input_value, false);
+              }
+              inner_offset += block_infos.position_info_[i].size_; 
+            }
+          }
+
+
         }
       }
 
@@ -394,5 +539,8 @@ namespace oceanbase
 
       return ret;
     }
+
+
+
   }
 }

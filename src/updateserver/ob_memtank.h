@@ -26,6 +26,7 @@
 #include "common/ob_define.h"
 #include "common/ob_string_buf.h"
 #include "common/page_arena.h"
+#include "ob_ups_utils.h"
 
 namespace oceanbase
 {
@@ -52,6 +53,7 @@ namespace oceanbase
     class MemTank
     {
       static const int64_t PAGE_SIZE = 2 * 1024L * 1024L;
+      static const int64_t AVAILABLE_WARN_SIZE = 2L * 1024L * 1024L * 1024L; //2G
       public:
         MemTank(const int32_t mod_id = common::ObModIds::OB_UPS_MEMTABLE)
           : total_limit_(INT64_MAX),
@@ -143,7 +145,14 @@ namespace oceanbase
       public:
         bool mem_over_limit() const
         {
-          return ((total() + extern_mem_total_ptr_->get_extern_mem_total()) >= total_limit_);
+          int64_t table_total = total() + extern_mem_total_ptr_->get_extern_mem_total();
+          int64_t table_available = total_limit_ - table_total;
+          int64_t table_available_warn_size = get_table_available_warn_size();
+          if (table_available_warn_size >= table_available)
+          {
+            ups_available_memory_warn_callback(table_available);
+          }
+          return (table_total >= total_limit_);
         };
         int64_t used() const
         {

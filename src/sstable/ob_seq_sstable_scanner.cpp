@@ -110,20 +110,15 @@ namespace oceanbase
     {
       int ret = OB_SUCCESS;
       // has no sstable readers, return OB_ITER_END for empty dataset;
-      if (sstable_array_.get_array_index() == 0)
+      if (OB_UNLIKELY(sstable_array_.get_array_index() == 0))
       {
         ret = OB_ITER_END;
       }
-      else if (cur_iter_idx_ < 0 || cur_iter_idx_ > sstable_array_.get_array_index())
+      else if (OB_UNLIKELY(cur_iter_idx_ < 0 || cur_iter_idx_ > sstable_array_.get_array_index()))
       {
         TBSYS_LOG(ERROR, "cur_iter_idx_ = %d > sstable array size=%ld",
             cur_iter_idx_, sstable_array_.get_array_index());
         ret = OB_ERROR_OUT_OF_RANGE;
-      }
-      else if (NULL == scan_param_.get_range() || scan_param_.get_range()->empty())
-      {
-        TBSYS_LOG(ERROR, "internal error, scan_param_ range not set.");
-        ret = OB_ERROR;
       }
       else
       {

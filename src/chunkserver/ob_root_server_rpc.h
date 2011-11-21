@@ -35,6 +35,14 @@
       usleep(THE_CHUNK_SERVER.get_param().get_network_time_out()); \
     } 
 
+#define rpc_retry_wait(running, retry_times, ret, rpc) \
+    while (running && retry_times-- > 0) \
+    { \
+      ret = (rpc); \
+      if (OB_SUCCESS == ret || OB_RESPONSE_TIME_OUT != ret) break; \
+      usleep(THE_CHUNK_SERVER.get_param().get_network_time_out()); \
+    } 
+
 
 namespace oceanbase
 {

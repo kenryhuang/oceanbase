@@ -11,6 +11,10 @@ LDADD = $(top_builddir)/src/common/compress/libcomp.a \
 		${TBLIB_ROOT}/lib/libtbsys.a 
 
 AM_LDFLAGS = -lnuma -lpthread -lc -lm -lrt -ldl -laio
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_LIBRARIES = libsstable.a
 libsstable_a_SOURCES = ob_blockcache.cpp \
@@ -63,3 +67,5 @@ EXTRA_DIST = \
 	ob_aio_event_mgr.h \
 	ob_disk_path.h \
 	ob_sstable_stat.h
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

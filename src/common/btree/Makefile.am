@@ -1,6 +1,11 @@
 noinst_LIBRARIES = libbtree.a
 AM_CPPFLAGS=-I${TBLIB_ROOT}/include/tbsys 
 #-DOCEAN_BASE_BTREE_USE_SYS_MALLOC -DOCEAN_BASE_BTREE_DEBUG
+AM_LDFLAGS=-lc -lm -lrt
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 libbtree_a_SOURCES = btree_default_alloc.cpp \
 		     btree_node.cpp \
@@ -32,3 +37,5 @@ EXTRA_DIST = \
 	id_key_btree.h \
 	btree_default_alloc.h \
 	key_btree.h
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

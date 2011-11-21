@@ -267,6 +267,37 @@ namespace oceanbase
       return;
     }
 
+    void ObRootTable2::dump_unusual_tablets(int64_t current_version, int32_t replicas_num) const
+    {
+      TBSYS_LOG(INFO, "meta_table_.size():%d", (int32_t)meta_table_.get_array_index());
+      TBSYS_LOG(INFO, "current_version=%ld replicas_num=%d", current_version, replicas_num);
+      if (tablet_info_manager_ != NULL)
+      {
+        for (int32_t i = 0; i < meta_table_.get_array_index(); i++)
+        {
+          int32_t new_num = 0;
+          for (int32_t j = 0; j < OB_SAFE_COPY_COUNT; j++)
+          {
+            if (OB_INVALID_INDEX == data_holder_[i].server_info_indexes_[j]) //the server is down
+            {
+            }
+            else if (data_holder_[i].tablet_version_[j] == current_version)
+            {
+              ++new_num;
+            }
+          }
+          if (new_num < replicas_num)
+          {
+            // is an unusual tablet
+            tablet_info_manager_->hex_dump(data_holder_[i].tablet_info_index_, TBSYS_LOG_LEVEL_INFO);
+            data_holder_[i].dump();
+          }
+        }
+      }
+      TBSYS_LOG(INFO, "dump meta_table_ complete");
+      return;
+    }
+
     const common::ObTabletInfo* ObRootTable2::get_tablet_info(const const_iterator& it) const
     {
       int32_t tablet_index = 0;
@@ -347,15 +378,23 @@ namespace oceanbase
         const int32_t src_server_index, const int32_t dest_server_index, 
         const int64_t tablet_version)
     {
-      for (int32_t i = 0; i < OB_SAFE_COPY_COUNT; i++) 
+      int ret = OB_SUCCESS;
+      if (OB_INVALID_INDEX != src_server_index)
       {
-        if (it->server_info_indexes_[i] == src_server_index)
+        for (int32_t i = 0; i < OB_SAFE_COPY_COUNT; i++) 
         {
-          it->server_info_indexes_[i] = OB_INVALID_INDEX;
-          break;
+          if (it->server_info_indexes_[i] == src_server_index)
+          {
+            it->server_info_indexes_[i] = OB_INVALID_INDEX;
+            break;
+          }
         }
       }
-      return modify(it, dest_server_index, tablet_version);
+      if (OB_INVALID_INDEX != dest_server_index)
+      {
+        ret = modify(it, dest_server_index, tablet_version);
+      }
+      return ret;
     }
 
     ObRootTable2::const_iterator ObRootTable2::lower_bound(const common::ObRange& range) const
@@ -462,7 +501,6 @@ namespace oceanbase
           if (crc_helper != NULL)
           {
             crc_helper->reset();
-            TBSYS_LOG(DEBUG, "tablet_index = %d init crc version = %ld crc = %lu", tablet_index, tablet_version, tablet.crc_sum_);
             crc_helper->check_and_update(tablet_version, tablet.crc_sum_);
           }
           ObRootMeta2 meta;
@@ -677,15 +715,13 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
           {
             if (tablet_info->range_.start_key_.compare(last_range.end_key_) != 0)
             {
-              TBSYS_LOG(WARN, "table %lu have a hole last range is ", last_range.table_id_);
-              last_range.hex_dump(TBSYS_LOG_LEVEL_INFO);
               static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
               last_range.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
-              TBSYS_LOG(INFO, "%s", row_key_dump_buff);
-              TBSYS_LOG(INFO, "now is table %lu  range is ", tablet_info->range_.table_id_);
-              tablet_info->range_.hex_dump(TBSYS_LOG_LEVEL_INFO);
+              TBSYS_LOG(WARN, "table not complete, table_id=%lu last_range=%s", 
+                        last_range.table_id_, row_key_dump_buff);
               tablet_info->range_.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
-              TBSYS_LOG(INFO, "%s", row_key_dump_buff);
+              TBSYS_LOG(WARN, "cur_table_id=%lu  curr_range=%s", 
+                        tablet_info->range_.table_id_, row_key_dump_buff);
               ret = false;
               //break;
             }
@@ -721,6 +757,7 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
     int ObRootTable2::shrink_to(ObRootTable2* shrunk_table) 
     {
       int ret = OB_ERROR;
+      static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
       if (shrunk_table != NULL && 
           shrunk_table->tablet_info_manager_ != NULL &&
           end() == sorted_end())
@@ -746,7 +783,6 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
             ret = OB_ERROR;
             break;
           }
-
           last_range = tablet_info->range_;
           ret = shrunk_table->tablet_info_manager_->add_tablet_info(*tablet_info, last_range_index);
           ObTabletCrcHistoryHelper *last_tablet_crc_helper = NULL;
@@ -774,17 +810,17 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
           //merge the same range
           while(tablet_info->range_.equal(last_range))
           {
-            TBSYS_LOG(DEBUG, "check and update version = %ld  crc = %lu", it->tablet_version_[0], tablet_info->crc_sum_);
+            tablet_info->range_.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
+            TBSYS_LOG(DEBUG, "shrink idx=%d range=%s", it-begin(), row_key_dump_buff);
+
             if (OB_SUCCESS != last_tablet_crc_helper->check_and_update(it->tablet_version_[0], tablet_info->crc_sum_))
             {
-              TBSYS_LOG(ERROR, "crc check error  %lu server index = %d you should not continue init", 
-                  tablet_info->crc_sum_, it->server_info_indexes_[0]);
+              TBSYS_LOG(ERROR, "crc check error,  crc=%lu last_crc=%lu last_cs=%d", 
+                        tablet_info->crc_sum_, it->tablet_version_[0], it->server_info_indexes_[0]);
               TBSYS_LOG(ERROR, "error tablet is");
-              shrunk_table->data_holder_[last_tablet_index].dump();
-              static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
               last_range.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
               TBSYS_LOG(ERROR, "%s", row_key_dump_buff);
-              TBSYS_LOG(ERROR, "%s", "tabletinfo in shrink table is");
+              TBSYS_LOG(ERROR, "tabletinfo in shrink table is");
 
               shrunk_table->data_holder_[last_tablet_index].dump();
               //last_range.hex_dump(TBSYS_LOG_LEVEL_ERROR);
@@ -805,7 +841,7 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
               ret = OB_ERROR;
               break;
             }
-          }
+          } // end while same range
           //split next OB_SAFE_COPY_COUNT * 2 is enough
           if (OB_SUCCESS == ret)
           {
@@ -822,12 +858,10 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
               cmp_ret = last_range.compare_with_startkey(tablet_info->range_);
               if (cmp_ret > 0)
               {
-                TBSYS_LOG(ERROR, "lost some tablet, we can not continue");
-                TBSYS_LOG(ERROR, "last range is ");
-                static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
                 last_range.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
-                TBSYS_LOG(ERROR, "%s", row_key_dump_buff);
-                //last_range.hex_dump(TBSYS_LOG_LEVEL_ERROR);
+                TBSYS_LOG(ERROR, "lost some tablet, last_range=%s", row_key_dump_buff);
+                tablet_info->range_.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
+                TBSYS_LOG(ERROR, "this_range=%s", row_key_dump_buff);
                 ret = OB_ERROR;
                 break;
               }
@@ -836,7 +870,7 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
                 //no need split
                 continue;
               }
-              //compare end key
+              // same start key, compare end key
               cmp_ret = last_range.compare_with_endkey(tablet_info->range_);
               if (cmp_ret > 0)
               {
@@ -846,21 +880,20 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
               if (cmp_ret == 0)
               {
                 TBSYS_LOG(ERROR, "we should skip this , bugs!!");
-                static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
                 last_range.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
-                TBSYS_LOG(ERROR, "%s", row_key_dump_buff);
-                //last_range.hex_dump(TBSYS_LOG_LEVEL_ERROR);
-                TBSYS_LOG(ERROR, "---------------------------");
+                TBSYS_LOG(ERROR, "last_range=%s", row_key_dump_buff);
                 tablet_info->range_.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
-                TBSYS_LOG(ERROR, "%s", row_key_dump_buff);
-                //  tablet_info->range_.hex_dump(TBSYS_LOG_LEVEL_ERROR);
-                TBSYS_LOG(ERROR, "====================");
+                TBSYS_LOG(ERROR, "this_range=%s", row_key_dump_buff);
 
                 //no need split
                 continue;
               }
               //split it2;
               TBSYS_LOG(ERROR, "in this version we sould not reach this init data have some error");
+              last_range.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
+              TBSYS_LOG(ERROR, "last_range=%s", row_key_dump_buff);
+              tablet_info->range_.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
+              TBSYS_LOG(ERROR, "this_range=%s", row_key_dump_buff);
               ret = OB_ERROR;
               break;
               merge_one_tablet(shrunk_table, last_tablet_index, it2);
@@ -1191,6 +1224,9 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
                 splited_range_top.end_key_ = range.start_key_;
               }
               splited_range_top.border_flag_.unset_max_value();
+              // set inclusive end anyway
+              splited_range_top.border_flag_.set_inclusive_end();
+              splited_range_bottom.border_flag_.set_inclusive_end();
               int32_t out_index_top = OB_INVALID_INDEX;
               int32_t out_index_bottom = OB_INVALID_INDEX;
               //not clone start key clone end key
@@ -1278,7 +1314,11 @@ int ObRootTable2::create_table(const common::ObTabletInfo& tablet, const int32_t
               int32_t out_index_top = OB_INVALID_INDEX;
               int32_t out_index_middle = OB_INVALID_INDEX;
               int32_t out_index_bottom = OB_INVALID_INDEX;
-
+              // set inclusive end anyway
+              splited_range_top.border_flag_.set_inclusive_end();
+              splited_range_bottom.border_flag_.set_inclusive_end();
+              splited_range_middle.border_flag_.set_inclusive_end();
+              
               if (OB_SUCCESS == ret)
               {
                 //clone end key, not clone start key

@@ -1,19 +1,18 @@
-/*
- * (C) 2007-2010 TaoBao Inc.
+/**
+ * (C) 2010-2011 Alibaba Group Holding Limited.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * dumpsst.cpp is for what ...
- *
- * Version: $id$
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * version 2 as published by the Free Software Foundation.
+ * 
+ * Version: $Id$
  *
  * Authors:
  *   MaoQi maoqi@taobao.com
- *
+ *   huating <huating.zmq@taobao.com>
+ *   rongxuan <rongxuan.lc@taobao.com>
+ *   qushan <qushan@taobao.com>
  */
-
 
 #include "common/ob_define.h"
 #include "common/ob_malloc.h"
@@ -35,6 +34,7 @@
 #include "sstable/ob_sstable_block_index_v2.h"
 #include "sstable/ob_sstable_scanner.h"
 #include "dumpsst.h"
+#include "common_func.h"
 #include <getopt.h>
 #include <dirent.h>
 #include <ctype.h>
@@ -216,6 +216,49 @@ void display_trailer_table_info(const ObSSTableTrailer& trailer)
   */
 }
 
+int dump_tablet(const ObTablet & tablet, const bool dump_sstable) 
+{
+  char range_buf[OB_RANGE_STR_BUFSIZ];
+  tablet.get_range().to_string(range_buf, OB_RANGE_STR_BUFSIZ);
+  uint64_t tablet_checksum = 0;
+  tablet.get_checksum(tablet_checksum);
+  fprintf(stderr, "range=%s, data version=%ld, disk_no=%d, "
+      "row count=%ld, occupy size = %ld crc sum=%lu, merged=%d\n", 
+      range_buf, tablet.get_data_version(), tablet.get_disk_no(), 
+      tablet.get_row_count(), tablet.get_occupy_size(), 
+      tablet_checksum, tablet.is_merged());
+  const common::ObArrayHelper<sstable::ObSSTableReader*>& sstable_reader_list_
+    = tablet.get_sstable_reader_list();
+  const common::ObArrayHelper<sstable::ObSSTableId>& sstable_id_list_ 
+    = tablet.get_sstable_id_list();
+  int64_t size = sstable_id_list_.get_array_index();
+  if (dump_sstable)
+  {
+    for (int64_t i = 0; i < size; ++i)
+    {
+      ObSSTableReader* reader = *sstable_reader_list_.at(i);
+      if (NULL != reader) 
+      {
+        fprintf(stderr, "sstable [%ld]: id=%ld, "
+            "trailer size = %ld, row count =%ld,block count=%ld\n", 
+            i, sstable_id_list_.at(i)->sstable_file_id_, 
+            reader->get_trailer().get_size(),
+            reader->get_trailer().get_row_count(),
+            reader->get_trailer().get_block_count()) ;
+      }
+    }
+  }
+  else
+  {
+    for (int64_t i = 0; i < size; ++i)
+    {
+      fprintf(stderr, "sstable [%ld]: id=%ld\n", 
+          i, sstable_id_list_.at(i)->sstable_file_id_) ;
+    }
+  }
+  return OB_SUCCESS;
+}
+
 void dump_multi_version_tablet_image(ObMultiVersionTabletImage & image, bool load_sstable)
 {
   ObTablet *tablet  = NULL;
@@ -233,9 +276,9 @@ void dump_multi_version_tablet_image(ObMultiVersionTabletImage & image, bool loa
       tablet->get_checksum(crcsum);
       fprintf(stderr, "tablet(%d) : %s \n", tablet_index, range_bufstr);
       fprintf(stderr, "\t info: data version = %ld , disk no = %d, "
-          "row count = %ld, occupy size = %ld , crc sum = %ld \n", 
+          "row count = %ld, occupy size = %ld , crc sum = %ld, merged=%d \n", 
           tablet->get_data_version(), tablet->get_disk_no(), tablet->get_row_count(), 
-          tablet->get_occupy_size(), crcsum);
+          tablet->get_occupy_size(), crcsum, tablet->is_merged());
       // dump sstable content
       const ObArrayHelper<ObSSTableId> & sstable_id_array = tablet->get_sstable_id_list();
       const ObArrayHelper<ObSSTableReader*> & sstable_reader_array = tablet->get_sstable_reader_list();
@@ -268,25 +311,109 @@ void dump_multi_version_tablet_image(ObMultiVersionTabletImage & image, bool loa
   image.end_scan_tablets();
 }
 
+int change_new_index(
+    const char* idx_file, 
+    const int64_t version, 
+    const int32_t disk_no, 
+    const char* action,
+    const int64_t table_id,
+    const char* range_str,
+    const int32_t hex_format,
+    const bool dump_sstable
+    )
+{
+  FileInfoCache cache;
+  cache.init(128);
+  ObTabletImage image;
+  image.set_fileinfo_cache(cache);
+
+  int64_t parse_version = 0;
+  int32_t parse_disk_no = 0;
+
+  ObRange range;
+  range.table_id_ = table_id;
+  ObTablet* tablet = NULL;
+
+  char idx_path[OB_MAX_FILE_NAME_LENGTH];
+  snprintf(idx_path, OB_MAX_FILE_NAME_LENGTH, "%s/%s", g_sstable_directory, idx_file);
+
+  int num = sscanf(idx_file, "idx_%ld_%d", &parse_version, &parse_disk_no);
+  if (num < 2)
+  {
+    parse_version = version;
+    parse_disk_no = disk_no;
+  }
+
+  image.set_data_version(parse_version);
+  int err = image.read(idx_path, parse_disk_no, dump_sstable);
+  if (OB_SUCCESS != err)
+  {
+    fprintf(stderr, "read image file failed\n");
+  }
+  else if (OB_SUCCESS != (err = parse_range_str(range_str, hex_format, range)))
+  {
+    fprintf(stderr, "parse_range_str %s error.\n", range_str);
+  }
+  else if (strcmp(action, "remove_range") == 0)
+  {
+    err = image.remove_tablet(range, parse_disk_no);
+  }
+  else if (strcmp(action, "set_merged_flag") == 0)
+  {
+    err = image.acquire_tablet(range, 
+        ObMultiVersionTabletImage::SCAN_FORWARD, tablet);
+    if (OB_SUCCESS == err && NULL != tablet)
+    {
+      tablet->set_merged(1);
+    }
+  }
+  else if (strcmp(action, "clear_merged_flag") == 0)
+  {
+    err = image.acquire_tablet(range, 
+        ObMultiVersionTabletImage::SCAN_FORWARD, tablet);
+    if (OB_SUCCESS == err && NULL != tablet)
+    {
+      tablet->set_merged(0);
+    }
+  }
+  else if (strcmp(action, "find_tablet") == 0)
+  {
+    err = image.acquire_tablet(range, 
+        ObMultiVersionTabletImage::SCAN_FORWARD, tablet);
+    if (OB_SUCCESS == err && NULL != tablet)
+    {
+      dump_tablet(*tablet, dump_sstable);
+    }
+  }
+
+  snprintf(idx_path, OB_MAX_FILE_NAME_LENGTH, "%s/%s.new", g_sstable_directory, idx_file);
+  if (OB_SUCCESS == err && strcmp(action, "find_tablet") != 0)
+  {
+    image.write(idx_path, parse_disk_no, false);
+  }
+
+  if (NULL != tablet) image.release_tablet(tablet);
+
+  return err;
+}
+
 //from file dump_file.cpp
 int dump_new_index(const char* idx_file, const int64_t version, const int32_t disk_no, const bool load_sstable)
 {
   FileInfoCache cache;
   cache.init(128);
   ObMultiVersionTabletImage image(cache);
-  
-  int64_t file_version = 0;
-  int32_t file_disk_no = 0;
-  int ret = sscanf(idx_file, "idx_%ld_%d", &file_version, &file_disk_no);
-  if (ret < 2)
-  {
-    file_version = version;
-    file_disk_no = disk_no;
-  }
-
   char idx_path[OB_MAX_FILE_NAME_LENGTH];
   snprintf(idx_path, OB_MAX_FILE_NAME_LENGTH, "%s/%s", g_sstable_directory, idx_file);
-  int err = image.read(idx_path, file_version, file_disk_no, load_sstable);
+  int64_t parse_version = 0;
+  int32_t parse_disk_no = 0;
+  int num = sscanf(idx_file, "idx_%ld_%d", &parse_version, &parse_disk_no);
+  if (num < 2)
+  {
+    parse_version = version;
+    parse_disk_no = disk_no;
+  }
+  int err = image.read(idx_path, parse_version, parse_disk_no, load_sstable);
   if (OB_SUCCESS == err)
   {
     dump_multi_version_tablet_image(image, load_sstable);
@@ -299,127 +426,6 @@ int dump_new_index(const char* idx_file, const int64_t version, const int32_t di
 }
 
 //from file dump_file.cpp
-int parse_range_str(const char* range_str, int hex_format, ObRange &range)
-{
-  int ret = OB_SUCCESS;
-  if(NULL == range_str)
-  {
-    ret = OB_INVALID_ARGUMENT;
-  }
-
-  int len = 0;
-  if(OB_SUCCESS == ret)
-  {
-    len = strlen(range_str);
-    if (len < 5)
-      ret = OB_ERROR;
-  }
-  if(OB_SUCCESS == ret)
-  {
-    const char start_border = range_str[0];
-    if (start_border == '[')
-      range.border_flag_.set_inclusive_start();
-    else if (start_border == '(')
-      range.border_flag_.unset_inclusive_start();
-    else
-    {
-      fprintf(stderr, "start char of range_str(%c) must be [ or (\n", start_border);
-      ret = OB_ERROR;
-    }
-  }
-  if(OB_SUCCESS == ret)
-  {
-    const char end_border = range_str[len - 1];
-    if (end_border == ']')
-      range.border_flag_.set_inclusive_end();
-    else if (end_border == ')')
-      range.border_flag_.unset_inclusive_end();
-    else
-    {
-      fprintf(stderr, "end char of range_str(%c) must be [ or (\n", end_border);
-      ret = OB_ERROR;
-    }
-  }
-  const char * sp = NULL;
-  char * del = NULL;
-  if(OB_SUCCESS == ret)
-  {
-    sp = range_str + 1;
-    del = strstr(sp, ",");
-    if (NULL == del)
-    {
-      fprintf(stderr, "cannot find , in range_str(%s)\n", range_str);
-      ret = OB_ERROR;
-    }
-  }
-  int start_len = 0;
-  if(OB_SUCCESS == ret)
-  {
-    while (*sp == ' ') ++sp; // skip space
-    start_len = del - sp;
-    if (start_len <= 0)
-    {
-      fprintf(stderr, "start key cannot be NULL\n");
-      ret = OB_ERROR;
-    }
-  }
-  if( OB_SUCCESS == ret)
-  {
-    if (strncasecmp(sp, "min", 3) == 0 )
-    {
-      range.border_flag_.set_min_value();
-    }
-    else
-    {
-      if (hex_format == 0)
-      {
-        range.start_key_.assign_ptr((char*)sp, start_len);
-      }
-      else
-      {
-        char *hexkey = (char*)ob_malloc(OB_RANGE_STR_BUFSIZ);
-        int hexlen = str_to_hex(sp, start_len, hexkey, OB_RANGE_STR_BUFSIZ);
-        range.start_key_.assign_ptr(hexkey, hexlen/2);
-      }
-    }
-  }
-  int end_len = 0;
-  const char * ep = NULL;
-  if(OB_SUCCESS == ret)
-  {
-    ep = del + 1;
-    while (*ep == ' ') ++ep;
-    end_len = range_str + len - 1 - ep;
-    if (end_len <= 0)
-    {
-      fprintf(stderr, "end key cannot be NULL\n");
-      ret = OB_ERROR;
-    }
-  }
-
-  if(OB_SUCCESS == ret)
-  {
-    if (strncasecmp(ep, "max", 3) == 0)
-    {
-      range.border_flag_.set_max_value();
-    }
-    else
-    {
-      if (hex_format == 0)
-      {
-        range.end_key_.assign_ptr((char*)ep, end_len);
-      }
-      else
-      {
-        char *hexkey = (char*)ob_malloc(OB_RANGE_STR_BUFSIZ);
-        int hexlen = str_to_hex(ep, end_len, hexkey, OB_RANGE_STR_BUFSIZ);
-        range.end_key_.assign_ptr(hexkey, hexlen/2);
-      }
-    }
-  }
-
-  return ret;
-}
 
 int meta_filter(const struct dirent *d)
 {
@@ -452,13 +458,16 @@ int find_tablet(const char* data_dir, const char* app_name,
   }
   char sstable_idx_file[OB_MAX_FILE_NAME_LENGTH];
   ObTablet* dest_tablet = NULL;
+  int64_t version = 0;
   if(OB_SUCCESS == ret)
   {
     for (int i = 0; i < meta_files; ++i)
     {
       ObTabletImage image;
+      sscanf(result[i]->d_name, "idx_%ld_%d", &version, &disk_no);
       snprintf(sstable_idx_file, OB_MAX_FILE_NAME_LENGTH,
           "%s/%s", sstable_dir, result[i]->d_name);
+      image.set_data_version(version);
       int ret = image.read(sstable_idx_file, disk_no, false);
       if (ret) break;
       if(OB_SUCCESS == ret)
@@ -477,15 +486,11 @@ int find_tablet(const char* data_dir, const char* app_name,
         for (int j = 0; j < sstable_id_list.get_array_index(); ++j)
         {
           ObSSTableId * id = sstable_id_list.at(j);
-          /*
-          char sstable_file[OB_MAX_FILE_NAME_LENGTH];
-          snprintf(sstable_file, OB_MAX_FILE_NAME_LENGTH, "%s/%ld",
-              sstable_dir, id->sstable_file_id_);
-              */
           ModuleArena arena;
           FileInfoCache cache;
           cache.init(10);
           ObSSTableReader reader(arena, cache);
+          g_sstable_directory = sstable_dir;
           ret = reader.open(*id);
           if (OB_SUCCESS != ret) continue;
           fprintf(stderr, "sstable[%d] id=%ld, "
@@ -528,7 +533,6 @@ int search_index(const char* data_dir, const char* app_name,
     if (OB_SUCCESS == no_ret) fprintf(stderr, "search range:%s\n", buf);
     else fprintf(stderr, "range to_string failed\n");
   }      
-  //range.hex_dump();
 
   ObDiskManager disk_manager;
   int64_t max_sstable_size = 256 * 1024 * 1024;
@@ -1477,7 +1481,7 @@ void DumpSSTable::dump_another_block(int32_t block_id)
                          * (block_header.row_count_ + 1);
     char index_array[entry_size];
     pos = 0;
-	
+  
     ret = block_reader.deserialize(index_array, entry_size, data, size, pos);
     if (OB_SUCCESS != ret)
     {
@@ -1488,68 +1492,68 @@ void DumpSSTable::dump_another_block(int32_t block_id)
       ObSSTableBlockReader::IndexEntryType* index = 
         (ObSSTableBlockReader::IndexEntryType*)index_array;
 
-	  uint64_t table_id;
-	  uint64_t column_group_id_array[OB_MAX_COLUMN_NUMBER];
-	  int64_t tmp_size = OB_MAX_COLUMN_NUMBER ;
-	  static int64_t row_count = 0;//count the row 
-	  static int64_t column_group_idx = 0;//count the column group id
+    uint64_t table_id;
+    uint64_t column_group_id_array[OB_MAX_COLUMN_NUMBER];
+    int64_t tmp_size = OB_MAX_COLUMN_NUMBER ;
+    static int64_t row_count = 0;//count the row 
+    static int64_t column_group_idx = 0;//count the column group id
       
-	  //get the table id and column_group_id_array
-	  table_id = reader_.get_trailer().get_first_table_id();
-	  ret = reader_.get_schema()->get_table_column_groups_id(table_id,
-	  							column_group_id_array,tmp_size);
-	  if (OB_SUCCESS != ret)
-	  {
-		  fprintf(stderr, "get column group id failed, table_id=%lu," 
-				  "tmp_size=%ld, column_group_id=%lu\n", 
-				  	table_id, tmp_size, column_group_id_array[0]);
-		  exit(1);
-	  }
-	  //traverse the rows in block (id)
-	  for(int32_t i = 0; i < block_header.row_count_ && OB_SUCCESS == ret; ++i)
+    //get the table id and column_group_id_array
+    table_id = reader_.get_trailer().get_first_table_id();
+    ret = reader_.get_schema()->get_table_column_groups_id(table_id,
+                  column_group_id_array,tmp_size);
+    if (OB_SUCCESS != ret)
+    {
+      fprintf(stderr, "get column group id failed, table_id=%lu," 
+          "tmp_size=%ld, column_group_id=%lu\n", 
+            table_id, tmp_size, column_group_id_array[0]);
+      exit(1);
+    }
+    //traverse the rows in block (id)
+    for(int32_t i = 0; i < block_header.row_count_ && OB_SUCCESS == ret; ++i)
       {
         column_count = OB_MAX_COLUMN_NUMBER;
-		//get each row of block for row_key ,current_ids ,current_columns
+    //get each row of block for row_key ,current_ids ,current_columns
         ret = block_reader.get_row(reader_.get_trailer().get_row_value_store_style(), 
                                    &index[i], row_key, current_ids, 
-                                   	current_columns, column_count);
+                                    current_columns, column_count);
         if (OB_SUCCESS == ret)
         {
-		  if ( (row_count >0) 
-			    && (row_count % reader_.get_trailer().get_row_count() == 0) )
-		  {//print if the row count == get_row_count
-			fprintf(stderr, "prev_idex=%ld, group_id=%lu, row_count=%ld\n", 
-					 column_group_idx, column_group_id_array[column_group_idx], 
-						reader_.get_trailer().get_row_count());
-			++column_group_idx;
-			//count the column_group id 
-			//when the column is the last one of this row
-			//same column_group_idx in same row
-		  }
+      if ( (row_count >0) 
+          && (row_count % reader_.get_trailer().get_row_count() == 0) )
+      {//print if the row count == get_row_count
+      fprintf(stderr, "prev_idex=%ld, group_id=%lu, row_count=%ld\n", 
+           column_group_idx, column_group_id_array[column_group_idx], 
+            reader_.get_trailer().get_row_count());
+      ++column_group_idx;
+      //count the column_group id 
+      //when the column is the last one of this row
+      //same column_group_idx in same row
+      }
 
-		  //set the new row
-	  	  new_row.clear();
-	  	  new_row.set_table_id(table_id);
-	  	  new_row.set_row_key(row_key);	
-		  new_row.set_column_group_id(column_group_id_array[column_group_idx]);
+      //set the new row
+        new_row.clear();
+        new_row.set_table_id(table_id);
+        new_row.set_row_key(row_key); 
+      new_row.set_column_group_id(column_group_id_array[column_group_idx]);
 
-		  //add columns to new row
+      //add columns to new row
           for(int j=0; j < column_count; ++j)
           {
-			if( OB_SUCCESS != new_row.add_obj(current_columns[j]) )
-			{//add each column to new row
-				fprintf(stderr,"add column %d to row %d failed!\n",j,i);
-			}
+      if( OB_SUCCESS != new_row.add_obj(current_columns[j]) )
+      {//add each column to new row
+        fprintf(stderr,"add column %d to row %d failed!\n",j,i);
+      }
           }
 
-		  if( OB_SUCCESS != writer_.append_row(new_row, approx_space_usage))
-		  {//append row to new sstable
-			fprintf(stderr,"add  row %d to block %d failed!, column_group_idx=%ld, " 
-							"group_id=%lu, row_count=%ld\n",i,block_id, column_group_idx, 
-							column_group_id_array[column_group_idx], row_count);
-			exit(1);	
-		  }
-		  ++row_count;//
+      if( OB_SUCCESS != writer_.append_row(new_row, approx_space_usage))
+      {//append row to new sstable
+      fprintf(stderr,"add  row %d to block %d failed!, column_group_idx=%ld, " 
+              "group_id=%lu, row_count=%ld\n",i,block_id, column_group_idx, 
+              column_group_id_array[column_group_idx], row_count);
+      exit(1);  
+      }
+      ++row_count;//
         }
         else
         {
@@ -1569,32 +1573,32 @@ void DumpSSTable::dump_another_block(int32_t block_id)
 
 void DumpSSTable::dump_another_sstable(const char * file_dir_,const char *compressor_)
 {
-	int ret = OB_SUCCESS;
-	const ObSSTableTrailer& trailer = reader_.get_trailer();
-	int64_t block_count = trailer.get_block_count();
+  int ret = OB_SUCCESS;
+  const ObSSTableTrailer& trailer = reader_.get_trailer();
+  int64_t block_count = trailer.get_block_count();
     common::ObString sstable_file_name_;
-	char dest_file_[1000];
-	char src_compressor_[1000];
-	ObString compressor_name_;
-	snprintf(dest_file_,sizeof(dest_file_), file_dir_);
-	sstable_file_name_.assign(dest_file_,strlen(dest_file_));
-	snprintf(src_compressor_,sizeof(src_compressor_),compressor_);
-	compressor_name_.assign(src_compressor_,strlen(src_compressor_));
+  char dest_file_[1000];
+  char src_compressor_[1000];
+  ObString compressor_name_;
+  snprintf(dest_file_,sizeof(dest_file_), file_dir_);
+  sstable_file_name_.assign(dest_file_,strlen(dest_file_));
+  snprintf(src_compressor_,sizeof(src_compressor_),compressor_);
+  compressor_name_.assign(src_compressor_,strlen(src_compressor_));
     //create sstable writer
-	ret = writer_.create_sstable(*reader_.get_schema(), sstable_file_name_,compressor_name_ ,2);
+  ret = writer_.create_sstable(*reader_.get_schema(), sstable_file_name_,compressor_name_ ,2);
 
-	if(OB_SUCCESS != ret)
-	{
-		fprintf(stderr,"create sstable writer failed !\n");
-		exit(1);
-	}
-	//dump all blocks
-	for(int32_t i2 = 0 ; i2 < block_count; ++i2)
-	{
-		dump_another_block(i2);// dump block i2 to new sstable
-	}
-	int64_t offset = 0 ;
-	writer_.close_sstable(offset);// close sstable writer
+  if(OB_SUCCESS != ret)
+  {
+    fprintf(stderr,"create sstable writer failed !\n");
+    exit(1);
+  }
+  //dump all blocks
+  for(int32_t i2 = 0 ; i2 < block_count; ++i2)
+  {
+    dump_another_block(i2);// dump block i2 to new sstable
+  }
+  int64_t offset = 0 ;
+  writer_.close_sstable(offset);// close sstable writer
 }
 
 
@@ -1684,23 +1688,23 @@ void DumpSSTable::load_blocks(int32_t block_id,int32_t block_n)
   const ObSSTableTrailer& trailer = reader_.get_trailer();
   int64_t block_count = trailer.get_block_count();
   if(block_count < block_id){
-	  fprintf(stderr,"wrong block_id and block_n , the block_count is %ld!\n",block_count);
-	  exit(1);
+    fprintf(stderr,"wrong block_id and block_n , the block_count is %ld!\n",block_count);
+    exit(1);
   }
   if((0 <= block_id) && (block_n <= block_count) ){
-	  	for(int32_t i1 = block_id; i1 <= block_n ; i1++){
-			fprintf(stderr,"------------block %d--------------------\n",i1);
-				load_block(i1);
-			fprintf(stderr,"------------block %d--------------------\n",i1);
-			}
-	  }
+      for(int32_t i1 = block_id; i1 <= block_n ; i1++){
+      fprintf(stderr,"------------block %d--------------------\n",i1);
+        load_block(i1);
+      fprintf(stderr,"------------block %d--------------------\n",i1);
+      }
+    }
   if( (-1 == block_id) || (block_n > block_count) ) {
-	  	for(int32_t i2 = 0 ; i2 < block_count; ++i2){
-			fprintf(stderr,"------------block %d--------------------\n",i2);
-				load_block(i2);
-			fprintf(stderr,"------------block %d--------------------\n",i2);
-			}
-	  }
+      for(int32_t i2 = 0 ; i2 < block_count; ++i2){
+      fprintf(stderr,"------------block %d--------------------\n",i2);
+        load_block(i2);
+      fprintf(stderr,"------------block %d--------------------\n",i2);
+      }
+    }
 
   return;
 }
@@ -1778,7 +1782,7 @@ void DumpSSTable::display_schema_info()
 struct CmdLineParam
 {
   const char *cmd_type;
-  const char *data_dir;
+  const char *idx_file_name;
   const char *dump_content;
   int32_t block_id;
   int32_t block_n;//if not 0 , from block_id to block_n
@@ -1801,359 +1805,366 @@ void usage()
   printf("\n");
   printf("Usage: sstable_tools [OPTION]\n");
   printf("   -c| --cmd_type command type [dump_sstable|cmp_sstable|dump_meta|search_meta] \n");
-  printf("   -c dump_meta -P idx_file_name -D idx_file_directory [-i disk_no -v data_version -x]\n");
   printf("   -D| --sstable_directory sstable directory \n");
+  printf("   -I| --idx_file_name must be set while cmd_type is dump_meta\n");
   printf("   -f| --file_id sstable file id\n");
   printf("   -p| --dst_file_id must be set while cmp_type is cmp_sstable\n");
-  printf("   -P| --data_dir\n");
   printf("   -d| --dump_content [dump_sstable_index|dump_sstable_schema|dump_trailer] could be set while cmd_type is dump_sstable\n");
   printf("   -b| --block_id show rows number in block,could be set  while cmd_type is dump_sstable and dump_content is dump_trailer\n");
   printf("   -i| --tablet_version must be set while cmp_type is dump_meta \n");
-  printf("   -i| --disk_no must be set while cmp_type is dump_meta \n");
   printf("   -r| --search_range must be set while cmp_type is search _meta\n");
   printf("   -t| --table_id must be set while cmp_type is search _meta\n");
   printf("   -a| --app_name must be set while cmp_type is search _meta\n");
-  printf("   -x| --hex_format should be appear after search_meta\n");
+  printf("   -x| --hex_format (0 plain string/1 hex string/2 number)\n");
   printf("   -h| --help print this help info\n");
+  printf("   samples:\n");
+  printf("   -c dump_meta -I idx_file_name -D idx_file_directory [-i disk_no -v data_version -x]\n");
+  printf("   -c dump_sstable -d dump_sstable_index -f sstable_id -D sstable_directory \n");
+  printf("   -c dump_sstable -d dump_sstable_schema -f sstable_id -D sstable_directory \n");
+  printf("   -c dump_sstable -d dump_trailer -f sstable_id -D sstable_directory \n");
+  printf("   -c search_meta -t table_id -r search_range -a app_name -x hex_format -D sstable_directory \n");
+  printf("   -c change_meta -t table_id -r search_range -d action"
+      "(remove_range/set_merged_flag/clear_merged_flag/find_tablet) "
+      "-x hex_format -D sstable_directory [-i disk_no -v data_version -f dump_sstable]\n");
   printf("\n");
   exit(0);
 }
 
 bool is_all_num(char  *str)
 {
-	int str_len = 0;
-	int dot_flag = 0;
-	while(*str != '\0')
-	{
-		str_len++;
-		if(*str > '9')
-			return false;
-		else if(*str < '0')
-		{
-			if(*str == '+' || *str == '-')
-			{
-				str++;
-				dot_flag++;
-				if( 1 < dot_flag )
-				{
-					fprintf(stderr,"wrong input the  + or - \n");
-					exit(1);
-				}else
-					continue;
-			}else
-				return false;
-		}
-		if( dot_flag == 0 )
-		{
-		  dot_flag++;
-		}
-		str++;
-	}
-	return true;
+  int str_len = 0;
+  int dot_flag = 0;
+  while(*str != '\0')
+  {
+    str_len++;
+    if(*str > '9')
+      return false;
+    else if(*str < '0')
+    {
+      if(*str == '+' || *str == '-')
+      {
+        str++;
+        dot_flag++;
+        if( 1 < dot_flag )
+        {
+          fprintf(stderr,"wrong input the  + or - \n");
+          exit(1);
+        }else
+          continue;
+      }else
+        return false;
+    }
+    if( dot_flag == 0 )
+    {
+      dot_flag++;
+    }
+    str++;
+  }
+  return true;
 }
 
 bool safe_char_int32(char *src_str , int32_t &dst_num)
 {
-	bool ret = true;
-	char *tmp_str = src_str;
-	char *str;
-	int str_len = 0;
-	int dot_num = 0;
-	int64_t src_num_64;
-	int64_t src_num_32;
-	while(*tmp_str != '\0')
-	{
-		if(*tmp_str > '9')
-		{
-			fprintf(stderr,"error int : invalid char\n");
-			ret = false;
-			break;
-		}
-		else if(*tmp_str < '0')
-		{
-			if(*tmp_str == ' ')
-			{
-				if(str_len == 0)
-				{
-					tmp_str++;
-					continue;
-				}else
-				{
-					fprintf(stderr,"error int : invalid space \n"); 
-					ret = false;
-					break;
-				}
-			}
-			else if(*tmp_str == '+' || *tmp_str == '-')
-			{
-				dot_num++;
-				if( 1 < dot_num )
-				{
-					fprintf(stderr,"error int : invalid + or -\n");
-					ret = false;
-					break;
-				}
-				else
-				{
-					str = tmp_str; 
-				}
-			}else
-			{
-				fprintf(stderr,"error int : invalid char\n");
-				ret = false;
-				break;
-			}
-		}
-		else
-		{
-			if (*tmp_str == '0' && str_len == 0)
-			{
-				if(*(tmp_str+1) != '\0')
-				{
-				  tmp_str++;
-				  continue;
-				}else
-				{
-				  str = tmp_str;
-				}
-			}else if(dot_num == 0)
-			{
-				dot_num++;
-				str = tmp_str;
-			}
-		}
+  bool ret = true;
+  char *tmp_str = src_str;
+  char *str;
+  int str_len = 0;
+  int dot_num = 0;
+  int64_t src_num_64;
+  int64_t src_num_32;
+  while(*tmp_str != '\0')
+  {
+    if(*tmp_str > '9')
+    {
+      fprintf(stderr,"error int : invalid char\n");
+      ret = false;
+      break;
+    }
+    else if(*tmp_str < '0')
+    {
+      if(*tmp_str == ' ')
+      {
+        if(str_len == 0)
+        {
+          tmp_str++;
+          continue;
+        }else
+        {
+          fprintf(stderr,"error int : invalid space \n"); 
+          ret = false;
+          break;
+        }
+      }
+      else if(*tmp_str == '+' || *tmp_str == '-')
+      {
+        dot_num++;
+        if( 1 < dot_num )
+        {
+          fprintf(stderr,"error int : invalid + or -\n");
+          ret = false;
+          break;
+        }
+        else
+        {
+          str = tmp_str; 
+        }
+      }else
+      {
+        fprintf(stderr,"error int : invalid char\n");
+        ret = false;
+        break;
+      }
+    }
+    else
+    {
+      if (*tmp_str == '0' && str_len == 0)
+      {
+        if(*(tmp_str+1) != '\0')
+        {
+          tmp_str++;
+          continue;
+        }else
+        {
+          str = tmp_str;
+        }
+      }else if(dot_num == 0)
+      {
+        dot_num++;
+        str = tmp_str;
+      }
+    }
 
-		str_len++;
-		tmp_str++;
-	}//end of while
+    str_len++;
+    tmp_str++;
+  }//end of while
 
-	if(str_len > 10 )
-	{
-		ret = false;
-		fprintf(stderr,"error int : invalid length \n");
-	}
-	if( ret )
-	{
-		src_num_64 = atoll(str);
-		src_num_32 = atoi(str);
-		if(src_num_32 != src_num_64)
-		{
-			fprintf(stderr,"error int : overflow or underflow\n");
-			ret = false;
-		}
-		/*
-		   if(src_num > 0xffffffff)
-		   {
-		   fprintf(stderr,"error int : overflow \n");
-		   return false;
-		   }else if (src_num < 0xffffff+1)
-		   {
-		   fprintf(stderr,"error int : underflow \n");
-		   return false;
-		   }
-		   dst_num = src_num & 0xffffffff;
-		 */
-		 dst_num = src_num_32;
-	}
-	return ret;
+  if(str_len > 10 )
+  {
+    ret = false;
+    fprintf(stderr,"error int : invalid length \n");
+  }
+  if( ret )
+  {
+    src_num_64 = atoll(str);
+    src_num_32 = atoi(str);
+    if(src_num_32 != src_num_64)
+    {
+      fprintf(stderr,"error int : overflow or underflow\n");
+      ret = false;
+    }
+    /*
+       if(src_num > 0xffffffff)
+       {
+       fprintf(stderr,"error int : overflow \n");
+       return false;
+       }else if (src_num < 0xffffff+1)
+       {
+       fprintf(stderr,"error int : underflow \n");
+       return false;
+       }
+       dst_num = src_num & 0xffffffff;
+     */
+     dst_num = src_num_32;
+  }
+  return ret;
 }
 
 void deal_cmd_line(char * optarg_tmp , CmdLineParam &clp)
 {
-		const char *split_ = ",[]()\0";
-		char * tmp;
-		int32_t tmp_num;
-		int split_count = 0;
-		bool left_paren = false;
-		bool right_paren = false;
-		char *b_opt_arg;
-		int paren_match = 0;
-		int  paren_exist = 0;//if exist paren
-		char *ptr;
-		char *ptr2;
+    const char *split_ = ",[]()\0";
+    char * tmp;
+    int32_t tmp_num;
+    int split_count = 0;
+    bool left_paren = false;
+    bool right_paren = false;
+    char *b_opt_arg;
+    int paren_match = 0;
+    int  paren_exist = 0;//if exist paren
+    char *ptr;
+    char *ptr2;
 
-		b_opt_arg = optarg_tmp;
-		
-		//find the dot
-		ptr = strchr(b_opt_arg,',');
-		ptr2 = strrchr(b_opt_arg,',');
-		if ( NULL != ptr && NULL != ptr2 )
-		{
-			if ( ptr == b_opt_arg || *(ptr2+1) == '\0' )
-			{
-				fprintf(stderr,"invalid input of , \n");
-				exit(1);
-			}
-			if ( ptr != ptr2 )
-			{
-				fprintf(stderr,"multi input of , \n");
-				exit(1);
-			}
-		}
+    b_opt_arg = optarg_tmp;
+    
+    //find the dot
+    ptr = strchr(b_opt_arg,',');
+    ptr2 = strrchr(b_opt_arg,',');
+    if ( NULL != ptr && NULL != ptr2 )
+    {
+      if ( ptr == b_opt_arg || *(ptr2+1) == '\0' )
+      {
+        fprintf(stderr,"invalid input of , \n");
+        exit(1);
+      }
+      if ( ptr != ptr2 )
+      {
+        fprintf(stderr,"multi input of , \n");
+        exit(1);
+      }
+    }
 
-		//match the paren
-		ptr = strchr(b_opt_arg,'(');
-		if(ptr)
-		{
-			left_paren = true;
-			paren_exist++; 
-			paren_match++;
-		}
-		
-		ptr2 = strrchr(b_opt_arg,'(');
-		if(ptr2 != ptr)
-		{
-			fprintf(stderr,"multi left parens \n");
-			exit(1);
-		}
+    //match the paren
+    ptr = strchr(b_opt_arg,'(');
+    if(ptr)
+    {
+      left_paren = true;
+      paren_exist++; 
+      paren_match++;
+    }
+    
+    ptr2 = strrchr(b_opt_arg,'(');
+    if(ptr2 != ptr)
+    {
+      fprintf(stderr,"multi left parens \n");
+      exit(1);
+    }
 
-		ptr = strchr(b_opt_arg,')');
-		if(ptr)
-		{
-			right_paren = true;
-			paren_exist++; 
-			paren_match--;
-		}
-		ptr2 = strrchr(b_opt_arg,')');
-		if(ptr2 != ptr)
-		{
-			fprintf(stderr,"multi right parens \n");
-			exit(1);
-		}
+    ptr = strchr(b_opt_arg,')');
+    if(ptr)
+    {
+      right_paren = true;
+      paren_exist++; 
+      paren_match--;
+    }
+    ptr2 = strrchr(b_opt_arg,')');
+    if(ptr2 != ptr)
+    {
+      fprintf(stderr,"multi right parens \n");
+      exit(1);
+    }
 
-		ptr = strchr(b_opt_arg,'[');
-		if(ptr)
-		{
-			paren_match++;
-			paren_exist++; 
-		}
-		ptr2 = strrchr(b_opt_arg,'[');
-		if(ptr2 != ptr)
-		{
-			fprintf(stderr,"multi left parens \n");
-			exit(1);
-		}
+    ptr = strchr(b_opt_arg,'[');
+    if(ptr)
+    {
+      paren_match++;
+      paren_exist++; 
+    }
+    ptr2 = strrchr(b_opt_arg,'[');
+    if(ptr2 != ptr)
+    {
+      fprintf(stderr,"multi left parens \n");
+      exit(1);
+    }
 
-		ptr = strchr(b_opt_arg,']');
-		if(ptr)
-		{
-			paren_match--;	
-			paren_exist++; 
-		}
-		ptr2 = strrchr(b_opt_arg,']');
-		if(ptr2 != ptr)
-		{
-			fprintf(stderr,"multi right parens \n");
-			exit(1);
-		}
+    ptr = strchr(b_opt_arg,']');
+    if(ptr)
+    {
+      paren_match--;  
+      paren_exist++; 
+    }
+    ptr2 = strrchr(b_opt_arg,']');
+    if(ptr2 != ptr)
+    {
+      fprintf(stderr,"multi right parens \n");
+      exit(1);
+    }
 
-	    //	
+      //  
 
-		if ( paren_exist % 2 != 0 )
-		{
-			fprintf(stderr,"wrong num of parens ! \n");
-			exit(1);
-		}
-		if ( 0 != paren_match )
-		{	
-			fprintf(stderr,"wrong param , paren mismatch !\n");
-			exit(1);        
-		}else if((0 == paren_match) 
-		           && (2 != paren_exist && 0 != paren_exist))
-		{
-			fprintf(stderr,"wrong paren , only allow two parens !\n");
-			exit(1);
-		}
+    if ( paren_exist % 2 != 0 )
+    {
+      fprintf(stderr,"wrong num of parens ! \n");
+      exit(1);
+    }
+    if ( 0 != paren_match )
+    { 
+      fprintf(stderr,"wrong param , paren mismatch !\n");
+      exit(1);        
+    }else if((0 == paren_match) 
+               && (2 != paren_exist && 0 != paren_exist))
+    {
+      fprintf(stderr,"wrong paren , only allow two parens !\n");
+      exit(1);
+    }
 
-	    tmp = strtok(b_opt_arg,split_);
-		while( tmp!=NULL )
-		{
-			//check if all is num
-			if( !safe_char_int32(tmp, tmp_num) )// !is_all_num(tmp)
-			{
-				fprintf(stderr,"wrong param , not all is number !\n");
-				exit(1);
-			}
+      tmp = strtok(b_opt_arg,split_);
+    while( tmp!=NULL )
+    {
+      //check if all is num
+      if( !safe_char_int32(tmp, tmp_num) )// !is_all_num(tmp)
+      {
+        fprintf(stderr,"wrong param , not all is number !\n");
+        exit(1);
+      }
 
-			if( 0 == split_count )
-			{
-			  clp.block_id = tmp_num ;//atoi(tmp);
-			  clp.block_n = clp.block_id;
-			  split_count++;
-			}
-			else if( 1 == split_count )
-			{
-			  if( clp.block_id  <=  tmp_num )//( clp.block_id <= atoi(tmp) )
-			  	clp.block_n = tmp_num; //clp.block_n = atoi(tmp);
-			  else
-			  {//swap that block_n should >= block_id
-				  clp.block_n = clp.block_id;
-				  clp.block_id = tmp_num; //clp.block_id = atoi(tmp);
-			  }
-			  split_count++;
-			}
+      if( 0 == split_count )
+      {
+        clp.block_id = tmp_num ;//atoi(tmp);
+        clp.block_n = clp.block_id;
+        split_count++;
+      }
+      else if( 1 == split_count )
+      {
+        if( clp.block_id  <=  tmp_num )//( clp.block_id <= atoi(tmp) )
+          clp.block_n = tmp_num; //clp.block_n = atoi(tmp);
+        else
+        {//swap that block_n should >= block_id
+          clp.block_n = clp.block_id;
+          clp.block_id = tmp_num; //clp.block_id = atoi(tmp);
+        }
+        split_count++;
+      }
 
-			if( 2 < split_count )
-			{
-				//more than 2 param is wrong
-				fprintf(stderr,"wrong param , more than 2 params !\n");
-				exit(1);        
-			}
+      if( 2 < split_count )
+      {
+        //more than 2 param is wrong
+        fprintf(stderr,"wrong param , more than 2 params !\n");
+        exit(1);        
+      }
 
-			tmp = strtok(NULL,split_);
-			tmp_num = 0 ;
-		}//end of while (tmp!=NULL)
-			
-			if(1 == split_count && paren_exist)
-			{
-				fprintf(stderr,"wrong param , miss one param in 2 parens!\n");
-				// (id , ]
-				exit(1);        
-			}
+      tmp = strtok(NULL,split_);
+      tmp_num = 0 ;
+    }//end of while (tmp!=NULL)
+      
+      if(1 == split_count && paren_exist)
+      {
+        fprintf(stderr,"wrong param , miss one param in 2 parens!\n");
+        // (id , ]
+        exit(1);        
+      }
 
-			if( 2 == split_count && 2 > paren_exist)
-			{
-				fprintf(stderr,"wrong param , miss parens !\n");
-				exit(1);
-			}
-			//deal the params
-			
-			if( (-1 == clp.block_id) && (-1 == clp.block_n) )//get all blocks
-				return ;
-			
-			if( (-1 >= clp.block_id) || (-1 >= clp.block_n) ){
-				fprintf(stderr,"wrong param , input error !\n");
-			    exit(1);        
-			}
-			
-			if( (0 <= clp.block_id) && (clp.block_n == clp.block_id) 
-					&& (!left_paren && !right_paren))
-				return ;
-			else 
-			{
-				//deal the parens
-				if(left_paren)
-					clp.block_id = clp.block_id + 1;
-				if(right_paren)
-					clp.block_n = clp.block_n -1;
-			}
+      if( 2 == split_count && 2 > paren_exist)
+      {
+        fprintf(stderr,"wrong param , miss parens !\n");
+        exit(1);
+      }
+      //deal the params
+      
+      if( (-1 == clp.block_id) && (-1 == clp.block_n) )//get all blocks
+        return ;
+      
+      if( (-1 >= clp.block_id) || (-1 >= clp.block_n) ){
+        fprintf(stderr,"wrong param , input error !\n");
+          exit(1);        
+      }
+      
+      if( (0 <= clp.block_id) && (clp.block_n == clp.block_id) 
+          && (!left_paren && !right_paren))
+        return ;
+      else 
+      {
+        //deal the parens
+        if(left_paren)
+          clp.block_id = clp.block_id + 1;
+        if(right_paren)
+          clp.block_n = clp.block_n -1;
+      }
 
-			if( clp.block_id > clp.block_n )
-			{
-				fprintf(stderr,"wrong param , input error2 !\n");
-				exit(1);
-			}
+      if( clp.block_id > clp.block_n )
+      {
+        fprintf(stderr,"wrong param , input error2 !\n");
+        exit(1);
+      }
 }
 
 void parse_cmd_line(int argc,char **argv,CmdLineParam &clp)
 {
   int opt = 0;
-  const char* opt_string = "c:f:p:d:b:i:r:t:a:F:P:D:hxv:qo:s:";
+  const char* opt_string = "c:f:p:d:b:i:r:t:a:F:I:D:hx:v:qo:s:";
   struct option longopts[] =
   {
     {"help",0,NULL,'h'},
     {"cmd_type",1,NULL,'c'},
-    {"data_dir",1,NULL,'P'},
+    {"idx_file_name",1,NULL,'I'},
     {"file_id",1,NULL,'f'},
     {"dst_file_id",1,NULL,'p'},
     {"sstable_directory",1,NULL,'D'},
@@ -2166,8 +2177,8 @@ void parse_cmd_line(int argc,char **argv,CmdLineParam &clp)
     {"app_name",1,NULL,'a'},
     {"hex_format",0,NULL,'x'},
     {"quiet",0,NULL,'q'},
-	{"output_sstable_directory",1,NULL,'o'},
-	{"compressor_name",1,NULL,'s'},
+  {"output_sstable_directory",1,NULL,'o'},
+  {"compressor_name",1,NULL,'s'},
     {0,0,0,0}
   };
  
@@ -2184,8 +2195,8 @@ void parse_cmd_line(int argc,char **argv,CmdLineParam &clp)
       case 'c':
         clp.cmd_type = optarg;
         break;
-      case 'P':
-        clp.data_dir = optarg;
+      case 'I':
+        clp.idx_file_name = optarg;
         break;
       case 'f':
         clp.file_id = strtoll(optarg, NULL, 10);
@@ -2200,8 +2211,8 @@ void parse_cmd_line(int argc,char **argv,CmdLineParam &clp)
         clp.dump_content = optarg;
         break;
       case 'b':
-	    {
-			deal_cmd_line(optarg , clp);
+      {
+      deal_cmd_line(optarg , clp);
         }  
         break;
       case 'v':
@@ -2220,25 +2231,25 @@ void parse_cmd_line(int argc,char **argv,CmdLineParam &clp)
         clp.app_name = optarg;
         break;
       case 'x':
-        clp.hex_format = 1;
+        clp.hex_format = strtoll(optarg, NULL, 10);
         break;
       case 'q':
         clp.quiet = 1;
         break;
-	  case 'o':
-	  {
-		  clp.output_sst_dir = optarg;
-		  //snprintf(clp.output_sst_dir,sizeof(clp.output_sst_dir),"%s",optarg);
-		  fprintf(stderr,"out_put_sst_dir = %s\n",clp.output_sst_dir);
-	  }
-	  	break;
-	  case 's':
-	  {
-		  clp.compressor_name = optarg;
-		  //snprintf(clp.compressor_name,sizeof(clp.compressor_name),"%s",optarg);
-		  fprintf(stderr,"compressor_name = %s\n",clp.compressor_name);
-	  }
-	  	break;
+    case 'o':
+    {
+      clp.output_sst_dir = optarg;
+      //snprintf(clp.output_sst_dir,sizeof(clp.output_sst_dir),"%s",optarg);
+      fprintf(stderr,"out_put_sst_dir = %s\n",clp.output_sst_dir);
+    }
+      break;
+    case 's':
+    {
+      clp.compressor_name = optarg;
+      //snprintf(clp.compressor_name,sizeof(clp.compressor_name),"%s",optarg);
+      fprintf(stderr,"compressor_name = %s\n",clp.compressor_name);
+    }
+      break;
       default:
         usage();
         exit(1);        
@@ -2253,10 +2264,10 @@ void parse_cmd_line(int argc,char **argv,CmdLineParam &clp)
   }
 
   if(NULL == clp.cmd_type
-      || (NULL ==clp.data_dir &&  0 == strcmp("search_meta",clp.cmd_type ))
-      || (NULL != clp.dump_content && 0 != strcmp("dump_sstable", clp.cmd_type))
+      || (NULL != clp.dump_content && (0 != strcmp("dump_sstable", clp.cmd_type) && 0 != strcmp("change_meta", clp.cmd_type)))
       || (0<=clp.block_id && NULL == clp.dump_content)
       || (0 <= clp.block_id && 0 != strcmp("dump_sstable",clp.cmd_type))
+      || (0 == clp.idx_file_name && 0 == strcmp("dump_meta",clp.cmd_type))
       || (NULL == clp.search_range && 0 == strcmp("search_meta",clp.cmd_type))
       || (0 >= clp.table_id && 0 == strcmp("search_meta",clp.cmd_type))
       || (NULL == clp.app_name && 0 == strcmp("search_meta",clp.cmd_type))
@@ -2317,38 +2328,42 @@ int main(const int argc, char **argv)
     if(0 == strcmp("dump_trailer",clp.dump_content))
     {
       dump.display_trailer_info();
-	  if(0 <= clp.block_id)
-	  {
-		 if( clp.block_id == clp.block_n )
-		  	dump.load_block(clp.block_id);
-	     else 
-	 	    dump.load_blocks(clp.block_id,clp.block_n);//
-	  }//end of if(0<= clp.block_id )
-	  else if( (-1 == clp.block_id) && (clp.block_id == clp.block_n) )
-	  {
-	 	    dump.load_blocks(clp.block_id,clp.block_n);//print all
-	  }
-	}
+    if(0 <= clp.block_id)
+    {
+     if( clp.block_id == clp.block_n )
+        dump.load_block(clp.block_id);
+       else 
+        dump.load_blocks(clp.block_id,clp.block_n);//
+    }//end of if(0<= clp.block_id )
+    else if( (-1 == clp.block_id) && (clp.block_id == clp.block_n) )
+    {
+        dump.load_blocks(clp.block_id,clp.block_n);//print all
+    }
+  }
   }
 
   if(0 == strcmp("dump_sstable_new_compressor",clp.cmd_type))
   {
-	  DumpSSTable dump;
+    DumpSSTable dump;
       ret = dump.open(clp.file_id);
-	  fprintf(stderr,"dump sstable with new compressor \n");
-	  dump.dump_another_sstable(clp.output_sst_dir,clp.compressor_name);
+    fprintf(stderr,"dump sstable with new compressor \n");
+    dump.dump_another_sstable(clp.output_sst_dir,clp.compressor_name);
   }
   //if dump_meta
   if(0 == strcmp("dump_meta",clp.cmd_type))
   {
-    dump_new_index(clp.data_dir, clp.table_version, clp.disk_no, clp.hex_format > 0 ? true : false);
+    dump_new_index(clp.idx_file_name, clp.table_version, clp.disk_no, clp.hex_format > 0 ? true : false);
+  }
+  if(0 == strcmp("change_meta",clp.cmd_type))
+  {
+    change_new_index(clp.idx_file_name, clp.table_version, clp.disk_no, clp.dump_content, 
+        clp.table_id, clp.search_range, clp.hex_format, clp.file_id);
   }
 
   //if search_meta
   if(0 == strcmp("search_meta",clp.cmd_type))
   {
-    //search_index(file_name, app_name, table_id, range_str, hex_format);
-    search_index(clp.data_dir,clp.app_name,clp.table_id,clp.search_range,clp.hex_format);
+    search_index(g_sstable_directory,clp.app_name,clp.table_id,clp.search_range,clp.hex_format);
   }
   //if cmp_sstable
   if(0 == strcmp("cmp_sstable",clp.cmd_type))

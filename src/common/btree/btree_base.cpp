@@ -92,7 +92,7 @@ namespace oceanbase
           handle.root_pointer_ = root_pointer_;
           handle.ref_count_ = &(handle.root_pointer_->ref_count_);
           if ((old_value & RECYCLE_MASK) == ((root_pointer_->sequence_ << 32) & RECYCLE_MASK) &&
-               handle.root_pointer_ == root_pointer_)
+              handle.root_pointer_ == root_pointer_)
           {
             res = BtreeRootPointer::refcas(&(root_pointer_->ref_count_), old_value, old_value + 1);
           }
@@ -380,7 +380,7 @@ namespace oceanbase
                 break;
               }
 
-	      assert(parent->is_leaf() == 0);
+              assert(parent->is_leaf() == 0);
               OCEAN_BTREE_CHECK_TRUE(parent->is_leaf() == 0, "parent isn't leaf node.");
               param->node_[level+1] = reinterpret_cast<BtreeNode*>(pair->value_);
               OCEAN_BTREE_CHECK_TRUE(param->node_[level+1],
@@ -487,6 +487,7 @@ namespace oceanbase
       int32_t ret = ERROR_CODE_FAIL;
       // 释放空的next_handle
       handle.old_value_ = NULL;
+      handle.old_key_ = NULL;
       if (handle.next_handle_ && NULL == handle.next_handle_->owner_)
       {
         char *data = reinterpret_cast<char*>(handle.next_handle_);
@@ -588,6 +589,7 @@ namespace oceanbase
             if (NULL != oldpair)
             {
               handle.old_value_ = oldpair->value_;
+              handle.old_key_ = oldpair->key_;
 #ifdef OCEAN_BTREE_CHECK
               check_key = oldpair->key_;
 #endif

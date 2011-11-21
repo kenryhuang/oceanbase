@@ -39,8 +39,11 @@ namespace oceanbase
       public:
         int set_freeze_memtable();
         int set_drop_memtable();
+        int set_first_start();
+        bool is_normal_mutator() const;
         bool is_freeze_memtable() const;
         bool is_drop_memtable() const;
+        bool is_first_start() const;
         void set_mutate_timestamp(const int64_t timestamp);
         int64_t get_mutate_timestamp() const;
         void set_memtable_checksum_before_mutate(const int64_t checksum);
@@ -62,6 +65,7 @@ namespace oceanbase
         static const int32_t NORMAL_FLAG = 0;
         static const int32_t FREEZE_FLAG = 1;
         static const int32_t DROP_FLAG = 2;
+        static const int32_t START_FLAG = 3;
 
       private:
         int32_t version_;

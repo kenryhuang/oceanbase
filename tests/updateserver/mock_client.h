@@ -29,6 +29,7 @@
 #include "common/ob_mutator.h"
 #include "common/thread_buffer.h"
 #include "common/ob_bloomfilter.h"
+#include "common/ob_log_cursor.h"
 #include "updateserver/ob_ups_utils.h"
 #include "updateserver/ob_ups_stat.h"
 #include "updateserver/ob_store_mgr.h"
@@ -50,7 +51,7 @@ class BaseClient
     virtual int initialize();
     virtual int destroy();
     virtual int wait();
-    
+
     ObClientManager * get_rpc()
     {
       return &client_;
@@ -265,6 +266,14 @@ class MockClient : public BaseClient
     }
 
   public:
+    int delay_drop_memtable(const int64_t timeout)
+    {
+      return send_command(OB_UPS_DELAY_DROP_MEMTABLE, timeout);
+    }
+    int immediately_drop_memtable(const int64_t timeout)
+    {
+      return send_command(OB_UPS_IMMEDIATELY_DROP_MEMTABLE, timeout);
+    }
     int enable_memtable_checksum(const int64_t timeout)
     {
       return send_command(OB_UPS_ENABLE_MEMTABLE_CHECKSUM, timeout);
@@ -286,6 +295,14 @@ class MockClient : public BaseClient
       ObString str;
       str.assign_ptr(const_cast<char*>(fname), strlen(fname));
       return send_command(OB_UPS_RELOAD_CONF, str, timeout);
+    }
+    int get_max_clog_id(ObLogCursor& log_cursor, const int64_t timeout)
+    {
+      return send_request(OB_GET_CLOG_CURSOR, log_cursor, timeout);
+    }
+    int get_clog_master(ObServer& server, const int64_t timeout)
+    {
+      return send_request(OB_GET_CLOG_MASTER, server, timeout);
     }
     int get_bloomfilter(const int64_t version, TableBloomFilter &table_bf, const int64_t timeout)
     {

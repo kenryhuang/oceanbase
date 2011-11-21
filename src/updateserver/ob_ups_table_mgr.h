@@ -209,6 +209,10 @@ namespace oceanbase
         int sstable_scan_finished(const int64_t minor_num_limit);
         int check_sstable_id();
         void log_table_info();
+        template <typename T>
+        int flush_obj_to_log(const common::LogCommand log_command, T &obj);
+        int write_start_log();
+        void set_warm_up_percent(const int64_t warm_up_percent);
 
       private:
         int set_mutator_(ObUpsMutator &mutator);
@@ -219,7 +223,7 @@ namespace oceanbase
             const common::ObGetParam& get_param, common::ObScanner& scanner,
             const int64_t start_time, const int64_t timeout);
 
-        int add_to_scanner_(common::ObMerger& ups_merger, common::ObScanner& scanner,
+        int add_to_scanner_(common::ObMerger& ups_merger, common::ObScanner& scanner, const bool is_multi_update,
             int64_t& row_count, const int64_t start_time, const int64_t timeout);
       private:
         int trans_name2id_(common::ObMutator &mutator);
@@ -234,6 +238,7 @@ namespace oceanbase
         UpsSchemaMgr schema_mgr_;
         TableMgr table_mgr_;
         bool check_checksum_;
+        bool has_started_;
     };
   }
 }

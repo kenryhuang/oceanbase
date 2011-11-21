@@ -17,7 +17,6 @@
 #define OB_MERGER_BTREE_MAP_H_
 
 #include "tblog.h"
-#include "ob_btree_engine_alloc.h"
 #include "common/ob_malloc.h"
 #include "common/ob_define.h"
 #include "common/btree/btree_base.h"
@@ -55,17 +54,15 @@ namespace oceanbase
       int create(int64_t num, const bool write_lock = false);
       // get key value if exist
       int get(const _key & key, _value & value) const;
-      // insert or update the key value
-      int set(const _key & key, const _value & new_value, _value & old_value);
+      // insert or update the key or value
+      int set(const _key & key, const _value & new_value, _value & old_value,
+          const bool okey = true, const bool ovalue = true);
       // del the key
       int erase(const _key & key, _value & value);
       // get data node count
       int64_t size() const;
     
     private:
-      BtreeEngineAlloc key_alloc_;
-      BtreeEngineAlloc value_alloc_;
-      MemTank tank_;
       common::KeyBtree<_key, _value> * tree_map_;
     };
     
@@ -85,10 +82,7 @@ namespace oceanbase
       }
       else
       {
-        key_alloc_.set_mem_tank(&tank_);
-        value_alloc_.set_mem_tank(&tank_);
-        tree_map_ = new(std::nothrow) common::KeyBtree<_key, _value>(num, &key_alloc_, &value_alloc_);
-        //tree_map_ = new(std::nothrow) common::KeyBtree<_key, _value>(num);
+        tree_map_ = new(std::nothrow) common::KeyBtree<_key, _value>(num);
         if (NULL == tree_map_)
         {
           TBSYS_LOG(ERROR, "new KeyBtree failed:map[%p]", tree_map_);
@@ -164,12 +158,12 @@ namespace oceanbase
     
     template <class _key, class _value>
     int ObBtreeMap<_key, _value>::set(const _key & key, const _value & new_value,
-        _value & old_value)
+        _value & old_value, const bool okey /* = true */, const bool ovalue /* = true */)
     {
       int ret = common::OB_SUCCESS;
       if (tree_map_)
       {
-        ret = tree_map_->put(key, new_value, old_value);
+        ret = tree_map_->put(key, new_value, old_value, okey, ovalue);
         if (ret != common::OB_SUCCESS)
         {
           TBSYS_LOG(DEBUG, "set key value failed:ret[%d]", ret);

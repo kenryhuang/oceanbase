@@ -7,12 +7,13 @@
  * 
  * Version: $Id$
  *
- * ob_log_replay_runnable.cpp for ...
+ * ob_common_param.cpp for ...
  *
  * Authors:
- *   yanran <yanran.hfs@taobao.com>
+ *    yanran <yanran.hfs@taobao.com>
  *
  */
+
 #include "ob_log_replay_runnable.h"
 
 #include "ob_define.h"
@@ -24,6 +25,9 @@ using namespace oceanbase::common;
 
 ObLogReplayRunnable::ObLogReplayRunnable()
 {
+  replay_wait_time_ = 100000;
+  role_mgr_ = NULL;
+  obi_role_ = NULL;
   is_initialized_ = false;
 }
 
@@ -31,7 +35,7 @@ ObLogReplayRunnable::~ObLogReplayRunnable()
 {
 }
 
-int ObLogReplayRunnable::init(const char* log_dir, const uint64_t log_file_id_start, ObRoleMgr *role_mgr, int64_t replay_wait_time)
+int ObLogReplayRunnable::init(const char* log_dir, const uint64_t log_file_id_start, const uint64_t log_seq_start, ObRoleMgr *role_mgr, ObiRole *obi_role, int64_t replay_wait_time)
 {
   int ret = OB_SUCCESS;
 
@@ -51,7 +55,7 @@ int ObLogReplayRunnable::init(const char* log_dir, const uint64_t log_file_id_st
 
   if (OB_SUCCESS == ret)
   {
-    ret = log_reader_.init(log_dir, log_file_id_start, true);
+    ret = log_reader_.init(log_dir, log_file_id_start, log_seq_start, true);
     if (OB_SUCCESS != ret)
     {
       TBSYS_LOG(ERROR, "ObLogReader init error[ret=%d], ObLogReplayRunnable init failed", ret);
@@ -59,8 +63,8 @@ int ObLogReplayRunnable::init(const char* log_dir, const uint64_t log_file_id_st
     else
     {
       role_mgr_ = role_mgr;
+      obi_role_ = obi_role;
       replay_wait_time_ = replay_wait_time;
-      set_max_log_file_id(0);
       is_initialized_ = true;
     }
   }
@@ -92,7 +96,8 @@ void ObLogReplayRunnable::run(tbsys::CThread* thread, void* arg)
       ret = log_reader_.read_log(cmd, seq, log_data, data_len);
       if (OB_READ_NOTHING == ret)
       {
-        if (ObRoleMgr::MASTER == role_mgr_->get_role())
+        if (ObRoleMgr::MASTER == role_mgr_->get_role()
+            && (NULL == obi_role_ || ObiRole::MASTER == obi_role_->get_role()))
         {
           stop();
         }
@@ -134,4 +139,9 @@ void ObLogReplayRunnable::run(tbsys::CThread* thread, void* arg)
   TBSYS_LOG(INFO, "ObLogReplayRunnable finished[stop=%d ret=%d]", _stop, ret);
 }
 
-
+void ObLogReplayRunnable::get_cur_replay_point(int64_t& log_file_id, int64_t& log_seq_id, int64_t& log_offset)
+{
+  log_file_id = log_reader_.get_cur_log_file_id();
+  log_seq_id = log_reader_.get_last_log_seq_id();
+  log_offset = log_reader_.get_last_log_offset();
+}

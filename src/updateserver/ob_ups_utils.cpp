@@ -581,6 +581,151 @@ namespace oceanbase
       return buffer;
     }
 
+    int64_t get_max_row_cell_num()
+    {
+      int64_t ret = ObUpdateServerParam::DEFAULT_MAX_ROW_CELL_NUM;
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(WARN, "get updateserver main fail");
+      }
+      else
+      {
+        ret = ups_main->get_update_server().get_param().get_max_row_cell_num();
+      }
+      return ret;
+    }
+
+    int64_t get_table_available_warn_size()
+    {
+      int64_t ret = ObUpdateServerParam::DEFAULT_TABLE_AVAILABLE_WARN_SIZE;
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(WARN, "get updateserver main fail");
+      }
+      else
+      {
+        ret = ups_main->get_update_server().get_param().get_table_available_warn_size();
+      }
+      return ret;
+    }
+
+    int64_t get_table_available_error_size()
+    {
+      int64_t ret = ObUpdateServerParam::DEFAULT_TABLE_AVAILABLE_ERROR_SIZE;
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(WARN, "get updateserver main fail");
+      }
+      else
+      {
+        ret = ups_main->get_update_server().get_param().get_table_available_error_size();
+      }
+      return ret;
+    }
+
+    int64_t get_table_memory_limit()
+    {
+      int64_t ret = 0;
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(WARN, "get updateserver main fail");
+      }
+      else
+      {
+        ret = ups_main->get_update_server().get_param().get_table_memory_limit();
+      }
+      return ret;
+    }
+
+    bool ups_available_memory_warn_callback(const int64_t mem_size_available)
+    {
+      bool bret = true;
+      static int64_t last_proc_time = 0;
+      static const int64_t MIN_PROC_INTERVAL = 60L * 1000L * 1000L;
+      int64_t table_available_error_size = ObUpdateServerParam::DEFAULT_TABLE_AVAILABLE_ERROR_SIZE_GB;
+      if ((last_proc_time + MIN_PROC_INTERVAL) < tbsys::CTimeUtil::getTime())
+      {
+        TBSYS_LOG(INFO, "available memory reach the warn-size=%ld last_proc_time=%ld, will try to free a memtable",
+                  mem_size_available, last_proc_time);
+        ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+        if (NULL == ups_main)
+        {
+          TBSYS_LOG(WARN, "get updateserver main fail");
+        }
+        else
+        {
+          ups_main->get_update_server().submit_delay_drop();
+          table_available_error_size = ups_main->get_update_server().get_param().get_table_available_error_size();
+        }
+        if (table_available_error_size >= mem_size_available)
+        {
+          TBSYS_LOG(ERROR, "available memory reach the error-size=%ld last_proc_time=%ld, will try to free a memtable",
+                    last_proc_time, mem_size_available);
+        }
+        last_proc_time = tbsys::CTimeUtil::getTime();
+      }
+      return bret;
+    }
+
+    const CacheWarmUpConf &get_warm_up_conf()
+    {
+      static const CacheWarmUpConf g_default_warm_up_conf;
+      const CacheWarmUpConf *ret = &g_default_warm_up_conf;
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(WARN, "get updateserver main fail");
+      }
+      else
+      {
+        ret = &(ups_main->get_update_server().get_param().get_warm_up_conf());
+      }
+      return *ret;
+    }
+
+    void set_warm_up_percent(const int64_t warm_up_percent)
+    {
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(WARN, "get updateserver main fail");
+      }
+      else
+      {
+        ups_main->get_update_server().get_table_mgr().set_warm_up_percent(warm_up_percent);
+      }
+    }
+
+    void submit_force_drop()
+    {
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(WARN, "get updateserver main fail");
+      }
+      else
+      {
+        ups_main->get_update_server().submit_force_drop();
+      }
+    }
+
+    void schedule_warm_up_duty()
+    {
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(WARN, "get updateserver main fail");
+      }
+      else
+      {
+        ups_main->get_update_server().schedule_warm_up_duty();
+      }
+    }
+
   }
 }
 

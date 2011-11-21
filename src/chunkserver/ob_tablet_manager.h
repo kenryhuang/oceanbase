@@ -86,9 +86,8 @@ namespace oceanbase
         int prepare_merge_tablets(const int64_t memtable_frozen_version);
         int prepare_tablet_image(const int64_t memtable_frozen_version);
 
-        void set_newest_frozen_version(const int64_t frozen_version);
-        bool can_launch_next_merge_round(const int64_t memtable_frozen_version);
         int merge_tablets(const int64_t memtable_frozen_version);
+        ObChunkMerge &get_chunk_merge() ;
 
         int report_tablets();
 
@@ -123,6 +122,7 @@ namespace oceanbase
         ObMultiVersionTabletImage& get_serving_tablet_image();
         ObDiskManager& get_disk_manager();
         ObRegularRecycler& get_regular_recycler();
+        ObScanRecycler& get_scan_recycler();
         mergeserver::ObJoinCache& get_join_cache();
 
         const ObMultiVersionTabletImage& get_serving_tablet_image() const;

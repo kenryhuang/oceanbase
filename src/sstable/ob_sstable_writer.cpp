@@ -43,7 +43,7 @@ namespace oceanbase
     const int16_t ObSSTableWriter::TRAILER_MAGIC       = 0x5472; //"Tr"
 
     ObSSTableWriter::ObSSTableWriter()
-    : inited_(false), first_row_(true), add_row_count_(true), filesys_(&default_filesys_), 
+      : inited_(false), first_row_(true), add_row_count_(true), dio_(false), filesys_(&default_filesys_), 
       table_id_(OB_INVALID_ID), column_group_id_(OB_INVALID_ID), 
       cur_key_buf_(DEFAULT_KEY_BUF_SIZE), bf_key_buf_(DEFAULT_KEY_BUF_SIZE), 
       offset_(0), prev_offset_(0), row_count_(0), prev_column_group_row_count_(0), 
@@ -173,8 +173,8 @@ namespace oceanbase
 
       if (OB_SUCCESS == ret)
       {
-        //open sstable file
-        ret = filesys_->open(path, true, true, true);
+        //open sstable file whether using dio according to config file
+        ret = filesys_->open(path, dio_, true, true);
         if (OB_SUCCESS != ret)
         {
           TBSYS_LOG(ERROR, "Problem open sstable file='%s', error=%s",

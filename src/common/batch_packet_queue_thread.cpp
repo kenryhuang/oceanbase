@@ -237,6 +237,13 @@ void BatchPacketQueueThread::checkSendSpeed() {
     _speed_t1 = _speed_t2;
 }
 
+void BatchPacketQueueThread::clear()
+{
+  _stop = false;
+  delete[] _thread;
+  _thread = NULL;
+}
+
 }
 }
 

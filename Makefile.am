@@ -13,14 +13,21 @@ utest: check
 
 TMP_DIR := /tmp/oceanbase-tmp.$(shell echo $$$$)
 PREFIX := $(shell [ x$(PREFIX) = x ] && PREFIX=/usr/local/oceanbase-$(VERSION) && echo "$${PREFIX}")
-rpms: dist-gzip rpm/oceanbase.spec
+RELEASE := $(shell [ x$(RELEASE) = x ] && RELEASE="0" && echo "$${RELEASE}")
+rpms: 
+	echo `pwd`
+	cd src/client/java && echo `pwd` && mvn package -Dmaven.test.skip=true
+	echo `pwd`
+	make dist-gzip rpm/oceanbase.spec
 	mkdir -p $(TMP_DIR)
 	mkdir -p $(TMP_DIR)/BUILD
 	mkdir -p $(TMP_DIR)/RPMS
 	mkdir -p $(TMP_DIR)/SOURCES
 	mkdir -p $(TMP_DIR)/SRPMS
 	cp oceanbase-${VERSION}.tar.gz $(TMP_DIR)/SOURCES
+	cp src/client/java/target/oceanbase-client-rm-1.1.1-SNAPSHOT.jar $(TMP_DIR)/SOURCES
 	echo $(PREFIX)
+	echo "RELEASE:$(RELEASE)"
 	cd $(TMP_DIR)/BUILD; \
 	tar xfz $(TMP_DIR)/SOURCES/oceanbase-${VERSION}.tar.gz \
 	        oceanbase-$(VERSION)/rpm/oceanbase.spec
@@ -28,6 +35,7 @@ rpms: dist-gzip rpm/oceanbase.spec
 	         --define "NAME $(PACKAGE)" \
 	         --define "VERSION $(VERSION)" \
 	         --define "_prefix $(PREFIX)" \
+	         --define "RELEASE $(RELEASE)" \
 	        -ba $(TMP_DIR)/BUILD/oceanbase-$(VERSION)/rpm/oceanbase.spec
 	find $(TMP_DIR)/RPMS/ -name "*.rpm" -exec mv '{}' . \;
 	rm -rf $(TMP_DIR)

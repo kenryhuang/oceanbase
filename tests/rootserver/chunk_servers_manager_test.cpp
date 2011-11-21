@@ -43,6 +43,7 @@ TEST(ObChunkServerManagerTest, find)
   ObChunkServerManager::iterator it = chunk_m.find_by_ip(server);
 
   ASSERT_TRUE(it != chunk_m.end());
+  server.set_port(0);
   ASSERT_TRUE(server == it->server_);
   ASSERT_EQ(11, it->last_hb_time_);
 
@@ -60,7 +61,9 @@ TEST(ObChunkServerManagerTest, find)
   ASSERT_TRUE(ret == OB_SUCCESS);
 
   ObChunkServerManager* read_manager = new ObChunkServerManager();
-  ret = read_manager->read_from_file(filename);
+  int32_t cs_num = 0;
+  int32_t ms_num = 0;
+  ret = read_manager->read_from_file(filename, cs_num, ms_num);
   TBSYS_LOG(DEBUG, "read from file result code: [%d]", ret);
   ASSERT_TRUE(ret == OB_SUCCESS);
 

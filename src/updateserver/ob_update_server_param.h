@@ -41,6 +41,16 @@ namespace oceanbase
           return ups_port_;
         }
 
+        inline int32_t get_ups_inst_master_port() const
+        {
+          return ups_inst_master_port_;
+        }
+
+        inline int32_t get_lsync_port() const
+        {
+          return lsync_port_;
+        }
+
         inline int64_t get_read_thread_count() const
         {
           return read_thread_count_;
@@ -89,6 +99,16 @@ namespace oceanbase
         inline const char* get_ups_vip() const
         {
           return ups_vip_;
+        }
+
+        inline const char* get_ups_inst_master_ip() const
+        {
+          return ups_inst_master_ip_;
+        }
+
+        inline const char* get_lsync_ip() const
+        {
+          return lsync_ip_;
         }
 
         inline int64_t get_log_sync_type() const
@@ -206,6 +226,11 @@ namespace oceanbase
           return lease_on_;
         }
 
+        inline int64_t get_slave_fail_wait_lease_on() const
+        {
+          return slave_fail_wait_lease_on_;
+        }
+
         inline int64_t get_packet_max_timewait() const
         {
           return packet_max_timewait_;
@@ -266,11 +291,6 @@ namespace oceanbase
           return minor_num_limit_;
         }
 
-        inline const int64_t get_frozen_mem_limit_gb() const
-        {
-          return frozen_mem_limit_gb_;
-        }
-
         inline const int64_t get_sstable_time_limit_s() const
         {
           return sstable_time_limit_s_;
@@ -305,6 +325,31 @@ namespace oceanbase
         {
           return major_freeze_duty_time_;
         }
+
+        inline const int64_t get_lsync_fetch_timeout() const
+        {
+          return lsync_fetch_timeout_;
+        }
+
+        inline const int64_t get_max_row_cell_num() const
+        {
+          return max_row_cell_num_;
+        }
+
+        inline const int64_t get_table_available_warn_size() const
+        {
+          return table_available_warn_size_;
+        }
+
+        inline const int64_t get_table_available_error_size() const
+        {
+          return table_available_error_size_;
+        }
+
+        inline const CacheWarmUpConf &get_warm_up_conf() const
+        {
+          return warm_up_conf_;
+        };
       public:
         int64_t get_low_priv_network_lower_limit() const
         {
@@ -316,19 +361,14 @@ namespace oceanbase
           return low_priv_network_upper_limit_;
         }
 
-        int64_t get_high_priv_max_wait_time_us() const
+        int64_t get_low_priv_cur_percent() const
         {
-          return high_priv_max_wait_time_us_;
+          return low_priv_cur_percent_;
         }
 
-        int64_t get_high_priv_adjust_time_us() const
+        int64_t get_low_priv_adjust_flag() const
         {
-          return high_priv_adjust_time_us_;
-        }
-
-        int64_t get_high_priv_wait_time_us() const
-        {
-          return high_priv_wait_time_us_;
+          return low_priv_adjust_flag_;
         }
 
       public:
@@ -355,14 +395,14 @@ namespace oceanbase
             low_priv_network_upper_limit_ = priv_queue_conf.low_priv_network_upper_limit;
           }
 
-          if (priv_queue_conf.high_priv_max_wait_time_ms != 0)
+          if (priv_queue_conf.low_priv_adjust_flag != 0)
           {
-            high_priv_max_wait_time_us_ = priv_queue_conf.high_priv_max_wait_time_ms * 1000L;
+            low_priv_adjust_flag_ = priv_queue_conf.low_priv_adjust_flag;
           }
 
-          if (priv_queue_conf.high_priv_adjust_time_ms != 0)
+          if (priv_queue_conf.low_priv_cur_percent != 0)
           {
-            high_priv_adjust_time_us_ = priv_queue_conf.high_priv_adjust_time_ms * 1000L;
+            low_priv_cur_percent_ = priv_queue_conf.low_priv_cur_percent;
           }
         }
       private:
@@ -370,7 +410,7 @@ namespace oceanbase
         int load_slave_conf();
         int load_standalone_conf();
         int load_string(char* dest, const int32_t size,
-            const char* section, const char* name, bool not_null);
+            const char* section, const char* name, bool not_null, tbsys::CConfig *config = NULL);
 
       private:
         static const int64_t DEFAULT_READ_THREAD_COUNT = 14;
@@ -402,8 +442,10 @@ namespace oceanbase
         static const int64_t DEFAULT_LEASE_INTERVAL_US = 8000000;
         static const int64_t DEFAULT_LEASE_RESERVED_TIME_US = 5000000;
         static const int64_t DEFAULT_LEASE_ON = 1;
+        static const int64_t DEFAULT_SLAVE_FAIL_WAIT_LEASE_ON = 0;
         static const int64_t DEFAULT_LOG_SYNC_TIMEOUT_US = 500 * 1000;
         static const int64_t DEFAULT_PACKET_MAX_TIMEWAIT = 10 * 1000 * 1000;
+        static const int64_t DEFAULT_LSYNC_FETCH_TIMEOUT = 10 * 1000 * 1000;
         static const int64_t DEFAULT_MAX_THREAD_MEMBLOCK_NUM = 10;
         static const int64_t DEFAULT_TRANS_PROC_TIME_WARN_US = 1000000;
         static const int64_t DEFAULT_BLOCKCACHE_SIZE_MB = 1024;  // 1GB
@@ -419,10 +461,14 @@ namespace oceanbase
 
         static const int64_t DEFAULT_LOW_PRIV_NETWORK_LOWER_LIMIT = 30; // 30M
         static const int64_t DEFAULT_LOW_PRIV_NETWORK_UPPER_LIMIT = 80; // 80M
-        static const int64_t DEFAULT_HIGH_PRIV_MAX_WAIT_TIME_US = 500 * 1000; // 500ms
-        static const int64_t DEFAULT_HIGH_PRIV_ADJUST_TIME_US = 5 * 1000; // 5ms
-        static const int64_t DEFAULT_HIGH_PRIV_WAIT_TIME_US = 50 * 1000; // 50ms
+        static const int64_t DEFAULT_LOW_PRIV_CUR_PERCENT = 10;
+        static const int64_t DEFAULT_LOW_PRIV_ADJUST_FLAG = 1;
         static const int DEFAULT_REPLAY_CHECKSUM_FLAG = 0;  // 默认不做
+        static const int64_t DEFAULT_MAX_ROW_CELL_NUM = 128;
+        static const int64_t DEFAULT_TABLE_AVAILABLE_WARN_SIZE_GB = 10; // 10g
+        static const int64_t DEFAULT_TABLE_AVAILABLE_ERROR_SIZE_GB = 5; // 5g
+        static const int64_t DEFAULT_TABLE_AVAILABLE_WARN_SIZE = DEFAULT_TABLE_AVAILABLE_WARN_SIZE_GB * GB_UNIT;
+        static const int64_t DEFAULT_TABLE_AVAILABLE_ERROR_SIZE = DEFAULT_TABLE_AVAILABLE_ERROR_SIZE_GB * GB_UNIT;
 
       private:
         int32_t ups_port_;
@@ -448,6 +494,10 @@ namespace oceanbase
         char standalone_schema_[common::OB_MAX_FILE_NAME_LENGTH];
         int64_t test_schema_version_;
         char ups_vip_[OB_MAX_IP_SIZE];
+        char ups_inst_master_ip_[OB_MAX_IP_SIZE];
+        int32_t ups_inst_master_port_;
+        char lsync_ip_[OB_MAX_IP_SIZE];
+        int32_t lsync_port_;
         int64_t replay_wait_time_us_;
         int64_t state_check_period_us_;
         int64_t log_sync_type_;
@@ -458,6 +508,7 @@ namespace oceanbase
         int64_t lease_interval_us_;
         int64_t lease_reserved_time_us_;
         int64_t lease_on_;
+        int64_t slave_fail_wait_lease_on_;
         int64_t log_sync_timeout_us_;
         int64_t packet_max_timewait_;
         int64_t max_thread_memblock_num_;
@@ -466,9 +517,8 @@ namespace oceanbase
         int64_t ups_inner_port_;
         int64_t low_priv_network_lower_limit_;
         int64_t low_priv_network_upper_limit_;
-        int64_t high_priv_max_wait_time_us_;
-        int64_t high_priv_adjust_time_us_;
-        int64_t high_priv_wait_time_us_;
+        int64_t low_priv_adjust_flag_;
+        int64_t low_priv_cur_percent_;
 
         char store_root_[common::OB_MAX_FILE_NAME_LENGTH];
         char raid_regex_[common::OB_MAX_FILE_NAME_LENGTH];
@@ -479,7 +529,6 @@ namespace oceanbase
 
         int64_t active_mem_limit_gb_;
         int64_t minor_num_limit_;
-        int64_t frozen_mem_limit_gb_;
         int64_t sstable_time_limit_s_;
         char sstable_compressor_name_[common::OB_MAX_FILE_NAME_LENGTH];
         int64_t sstable_block_size_;
@@ -488,6 +537,13 @@ namespace oceanbase
         int replay_checksum_flag_;
 
         char fetch_opt_[common::OB_MAX_FETCH_CMD_LENGTH];
+
+        int64_t lsync_fetch_timeout_;
+        int64_t max_row_cell_num_;
+        int64_t table_available_warn_size_;
+        int64_t table_available_error_size_;
+
+        CacheWarmUpConf warm_up_conf_;
     };
   }
 }

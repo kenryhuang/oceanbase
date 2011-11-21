@@ -37,6 +37,7 @@ struct CParam
   int64_t add_count_;
   int64_t start_key_;
   int64_t end_key_;
+  bool read_master_;
   oceanbase::common::ObSchemaManager *schema_mgr_;
 };
 
@@ -47,6 +48,7 @@ void print_usage()
   fprintf(stderr, "ms get client[OPTION]\n");
   fprintf(stderr, "   -a|--addr server address\n");
   fprintf(stderr, "   -p|--port server port\n");
+  fprintf(stderr, "   -r|--read master instance\n");
   fprintf(stderr, "   -m|--schema schema file\n");
   fprintf(stderr, "   -s|--start start rowkey must int type\n");
   fprintf(stderr, "   -e|--end end rowkey must int type\n");
@@ -59,12 +61,13 @@ int parse_cmd_args(int argc, char **argv, CParam & param)
 {
   int err = OB_SUCCESS;
   int opt = 0;
-  const char* opt_string = "a:p:c:m:t:s:e:h";
+  const char* opt_string = "a:p:c:m:t:s:e:rh";
   struct option longopts[] =
   {
     {"addr", 1, NULL, 'a'},
     {"port", 1, NULL, 'p'},
     {"count", 1, NULL, 'c'},
+    {"master", 0, NULL, 'r'},
     {"schema", 1, NULL, 'm'},
     {"table", 1, NULL, 't'},
     {"start", 1, NULL, 's'},
@@ -89,6 +92,9 @@ int parse_cmd_args(int argc, char **argv, CParam & param)
         break;
       case 't':
         param.table_name_ = optarg;
+        break;
+      case 'r':
+        param.read_master_ = true;
         break;
       case 'c':
         param.add_count_ = atol(optarg);
@@ -240,7 +246,8 @@ int get(CParam &param, MockClient &client)
       version_range.border_flag_.set_min_value();
       version_range.border_flag_.set_max_value();
       get_param.set_version_range(version_range);
-
+      get_param.set_is_result_cached(true);
+      get_param.set_is_read_consistency(param.read_master_);
       int64_t pos = 0;
       serialization::encode_i64(buffer, sizeof(buffer), pos, i);
       rowkey_str.assign(buffer, pos);

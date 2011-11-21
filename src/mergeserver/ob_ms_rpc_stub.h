@@ -17,6 +17,7 @@
 #define OCEANBASE_MERGER_RPC_STUB_H_
 
 #include "common/ob_server.h"
+#include "common/ob_ups_info.h"
 
 namespace oceanbase
 {
@@ -69,12 +70,19 @@ namespace oceanbase
       int heartbeat_server(const int64_t timeout, const common::ObServer & root_server,
           const common::ObServer & merge_server, const common::ObRole server_role) const;
 
-      // get update server addr through root server rpc call
+      // get update server vip addr through root server rpc call
       // param  @timeout  action timeout
       //        @root_server root server addr
       //        @update_server output server addr
-      int find_server(const int64_t timeout, const common::ObServer & root_server, 
+      int find_server(const int64_t timeout, const common::ObServer & root_server,
           common::ObServer & update_server) const;
+
+      // get update server list for read through root server rpc call
+      // param  @timeout  action timeout
+      //        @root_server root server addr
+      //        @ups_list output server addr list info
+      int fetch_server_list(const int64_t timeout, const common::ObServer & root_server,
+          common::ObUpsList & server_list) const;
 
       // get tables schema info through root server rpc call
       // param  @timeout  action timeout
@@ -87,11 +95,11 @@ namespace oceanbase
       // get tables schema newest version through root server rpc call
       // param  @timeout  action timeout
       //        @root_server root server addr
-      //        @timestamp output new version 
-      int fetch_schema_version(const int64_t timeout, const common::ObServer & root_server, 
+      //        @timestamp output new version
+      int fetch_schema_version(const int64_t timeout, const common::ObServer & root_server,
           int64_t & timestamp) const;
 
-    public: 
+    public:
       // get tablet location info through root server rpc call
       // param  @timeout  action timeout
       //        @root_server root server addr

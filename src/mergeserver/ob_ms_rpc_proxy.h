@@ -19,7 +19,10 @@
 #include "tbsys.h"
 #include "common/ob_string.h"
 #include "common/ob_server.h"
+#include "common/ob_ups_info.h"
 #include "common/ob_iterator.h"
+#include "ob_ms_read_balance.h"
+#include "ob_ms_server_blacklist.h"
 
 namespace oceanbase
 {
@@ -50,7 +53,7 @@ namespace oceanbase
     {
     public:
       //
-      ObMergerRpcProxy();
+      ObMergerRpcProxy(const common::ObServerType type = common::MERGE_SERVER);
       // construct func
       // param  @retry_times rpc call retry times when error occured
       //        @timeout every rpc call timeout
@@ -59,7 +62,7 @@ namespace oceanbase
       //        @mege_server merge server local host addr for input
       ObMergerRpcProxy(const int64_t retry_times, const int64_t timeout, 
           const common::ObServer & root_server, const common::ObServer & update_server,
-          const common::ObServer & merge_server);
+          const common::ObServer & merge_server, const common::ObServerType type = common::MERGE_SERVER);
       
       virtual ~ObMergerRpcProxy();
 
@@ -69,15 +72,18 @@ namespace oceanbase
       int init(ObMergerRpcStub * rpc_stub, ObMergerSchemaManager * schema, 
                ObMergerTabletLocationCache * cache, ObMergerServiceMonitor * monitor = NULL);
 
+      // set black list params
+      int set_blacklist_param(const int64_t timeout, const int64_t fail_count);
+
       // register merge server
       // param  @merge_server localhost merge server addr
       int register_merger(const common::ObServer & merge_server);
-      
+
       // merge server heartbeat with root server
       // param  @merge_server localhost merge server addr
       int async_heartbeat(const common::ObServer & merge_server);
 
-      static const int64_t LOCAL_NEWEST = 0;    // local cation newest version
+      static const int64_t LOCAL_NEWEST = 0;    // local newest version
 
       // get the scheam data according to the timetamp, in some cases depend on the timestamp value
       // if timestamp is LOCAL_NEWEST, it meanse only get the local latest version
@@ -89,6 +95,9 @@ namespace oceanbase
 
       // fetch new schema if find new version
       int fetch_schema_version(int64_t & timestamp);
+
+      // fetch update server list
+      int fetch_update_server_list(int32_t & count);
 
       // waring: release schema after using for dec the manager reference count
       //        @manager the real schema pointer returned
@@ -103,21 +112,30 @@ namespace oceanbase
       {
         return rpc_timeout_;
       }
+
       const common::ObServer & get_root_server(void) const
       {
         return root_server_;
       }
+      void set_root_server(const common::ObServer & server)
+      {
+        root_server_ = server;
+      }
+
       const common::ObServer & get_update_server(void) const
       {
         return update_server_;
       }
-
-    public:  
+      void set_update_server(const common::ObServer & server)
+      {
+        update_server_ = server;
+      }
+    public:
       // retry interval time
       static const int64_t RETRY_INTERVAL_TIME = 20; // 20 ms usleep
 
       // least fetch schema time interval
-      static const int64_t LEAST_FETCH_SCHEMA_INTERVAL = 1000 * 1000; // 1s 
+      static const int64_t LEAST_FETCH_SCHEMA_INTERVAL = 1000 * 1000; // 1s
       
       // get data from one chunk server, which is positioned according to the param
       // param  @get_param get param
@@ -204,11 +222,44 @@ namespace oceanbase
       int get_tablet_location(const uint64_t table_id, const common::ObString & row_key,
           ObMergerTabletLocationList & location);
 
+    private:
+      // get data from master update server
+      // param  @get_param get param
+      //        @scanner return result
+      int master_ups_get(const ObMergerTabletLocation & addr,
+          const common::ObGetParam & get_param, common::ObScanner & scanner);
+
+      // get data from update server list
+      // param  @get_param get param
+      //        @scanner return result
+      int slave_ups_get(const ObMergerTabletLocation & addr,
+          const common::ObGetParam & get_param, common::ObScanner & scanner);
+
+      // scan data from master update server
+      // param  @get_param get param
+      //        @scanner return result
+      int master_ups_scan(const ObMergerTabletLocation & addr,
+          const common::ObScanParam & scan_param, common::ObScanner & scanner);
+
+      // scan data from update server list
+      // param  @get_param get param
+      //        @scanner return result
+      int slave_ups_scan(const ObMergerTabletLocation & addr,
+          const common::ObScanParam & scan_param, common::ObScanner & scanner);
+
+      // check and modify update server list
+      void modify_ups_list(common::ObUpsList & list);
+
+      // check the server is ok to select for read
+      // not in blacklist and read percentage is gt 0
+      bool check_server(const int32_t index);
+
+    private:
       // get the first tablet location according range's first table_id.row_key [range.mode]
       // param  @range scan range
       //        @location the first range tablet location
-      int get_first_tablet_location(const common::ObScanParam & param,
-          ObMergerTabletLocationList & location);
+      int get_first_tablet_location(const common::ObScanParam & param, common::ObString & search_key,
+          char ** temp_buffer, ObMergerTabletLocationList & location);
 
       // scan tablet location through root_server rpc call
       // param  @table_id table id of root table 
@@ -229,14 +280,25 @@ namespace oceanbase
       char max_rowkey_[MAX_ROWKEY_LEN];             // 8 0xFF as max rowkey
       common::ObServer root_server_;                // root server addr
       common::ObServer merge_server_;               // merge server addr
-      common::ObServer update_server_;              // update server addr
+      common::ObServer update_server_;              // update server vip addr
+      // update server list
+      tbsys::CRWLock ups_list_lock_;                // lock for update server list
+      common::ObServerType server_type_;            // server type for different load balance
+      uint64_t cur_finger_print_;                   // server list finger print
+      int64_t fail_count_threshold_;                // pull to black list threshold times
+      int64_t black_list_timeout_;                   // black list timeout for alive
+      ObMergerServerBlackList black_list_;          // black list of update server
+      common::ObUpsList update_server_list_;        // update server list for read
+      // schema manager
+      tbsys::CThreadMutex schema_lock_;             // lock for update schema manager
+      int64_t fetch_schema_timestamp_;              // last fetch schema from root timestamp
+      ObMergerSchemaManager * schema_manager_;      // merge server schema cache
+      // location cache manager
+      tbsys::CThreadMutex cache_lock_;              // lock for update chunk server cache
+      ObMergerTabletLocationCache * tablet_cache_;  // merge server tablet location cache
+      // system monitor
       ObMergerServiceMonitor * monitor_;            // service monitor data
       const ObMergerRpcStub * rpc_stub_;            // rpc stub bottom module
-      ObMergerSchemaManager * schema_manager_;      // merge server schema cache
-      int64_t fetch_schema_timestamp_;              // last fetch schema from root timestamp
-      ObMergerTabletLocationCache * tablet_cache_;  // merge server tablet location cache
-      tbsys::CThreadMutex schema_lock_;             // lock for update schema manager
-      tbsys::CThreadMutex cache_lock_;              // lock for update chunk server cache
     };
   }
 }

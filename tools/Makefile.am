@@ -17,13 +17,15 @@ LDADD = $(top_builddir)/src/updateserver/libupdateserver.a \
 
 AM_LDFLAGS = -lpthread -lc -lm -lrt -ldl -laio -lnuma ${GCOV_LIB}
 CXXFLAGS = -D__STDC_LIMIT_MACROS -g -Wall -DORDER_SERIALIZE -DCOMPATIBLE -D_BTREE_ENGINE_ #-O2 -fno-strict-aliasing
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
-noinst_PROGRAMS = sstable_checker test_client databuilder  test_manager mergemeta gen_sstable cs_press cs_admin  merge_meta_new log_reader root_table_reader cs_info_reader gen_data_test dumpsst gen_meta
-
-bin_PROGRAMS = ups_admin
+bin_PROGRAMS = sstable_checker test_client databuilder  test_manager mergemeta gen_sstable cs_press cs_admin  merge_meta_new log_reader root_table_reader cs_info_reader gen_data_test ups_admin dumpsst gen_meta
 
 sstable_checker_SOURCES = ob_sstable_checker.cpp
-test_client_SOURCES = test_client.cpp 
+test_client_SOURCES = test_client.cpp $(top_builddir)/src/updateserver/ob_ups_stat.cpp
 databuilder_SOURCES = ob_databuilder.cpp ob_disk_path.cpp
 databuilder_CPPFLAGS= -DORDER_SERIALIZE ${AM_CPPFLAGS} #-DBUILDER_DEBUG 
 test_manager_SOURCES = test_manager.cpp ob_disk_path.cpp
@@ -32,11 +34,11 @@ gen_sstable_SOURCES=gen_sstable.cpp ob_disk_path.cpp
 gen_data_test_SOURCES=gen_data_test.cpp ob_disk_path.cpp
 cs_press_SOURCES = base_client.cpp cs_press.cpp client_rpc.cpp common_func.cpp
 cs_admin_SOURCES = base_client.cpp cs_admin.cpp client_rpc.cpp common_func.cpp stats.cpp ob_server_stats.cpp ob_cluster_stats.cpp ob_disk_path.cpp
-dumpsst_SOURCES = dumpsst.cpp feak_disk_path.cpp
+dumpsst_SOURCES = dumpsst.cpp feak_disk_path.cpp common_func.cpp
 gen_data_test_CPPFLAGS= -DGEN_SSTABLE_DEBUG ${AM_CPPFLAGS}
 merge_meta_new_SOURCES = merge_meta_new.cpp ob_disk_path.cpp
 
-log_reader_SOURCES = log_reader.cpp
+log_reader_SOURCES = log_reader.cpp $(top_builddir)/src/updateserver/ob_ups_stat.cpp
 root_table_reader_SOURCES = rt_root_table_reader.cpp
 cs_info_reader_SOURCES = rt_cs_info_reader.cpp
 ups_admin_SOURCES = ups_admin.cpp $(top_builddir)/tests/updateserver/test_utils.cpp $(top_builddir)/tests/updateserver/ob_final_data.cpp $(top_builddir)/src/updateserver/ob_ups_stat.cpp
@@ -61,7 +63,8 @@ EXTRA_DIST = \
         oceanbase.sh
 
 pkgdata_data_DATA=oceanbase.sh
-pkgdata_datadir=${prefix}/etc
-SUBDIRS=obsql
-#dist_bin_SCRIPTS=single-machine-bootstrap
+pkgdata_datadir=${prefix}
+SUBDIRS=syschecker dump_data 
 dist_bin_SCRIPTS=single-machine-bootstrap
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

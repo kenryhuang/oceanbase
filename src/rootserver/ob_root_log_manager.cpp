@@ -219,6 +219,7 @@ namespace oceanbase
       return OB_SUCCESS;
     }
 
+    // called by start_as_master
     int ObRootLogManager::replay_log()
     {
       int ret = OB_SUCCESS;
@@ -230,6 +231,7 @@ namespace oceanbase
       LogCommand cmd = OB_LOG_UNKNOWN;
       uint64_t seq = 0;
 
+      TBSYS_LOG(INFO, "begin replay log");
       ret = check_inner_stat();
 
       if (ret == OB_SUCCESS && !is_log_dir_empty_)
@@ -256,7 +258,7 @@ namespace oceanbase
         }
         if (ret == OB_SUCCESS)
         {
-          ret = log_reader.init(log_dir_, replay_point_, false);
+          ret = log_reader.init(log_dir_, replay_point_, 0, false);
           if (ret != OB_SUCCESS)
           {
             TBSYS_LOG(ERROR, "ObLogReader init failed, ret=%d", ret);
@@ -288,7 +290,7 @@ namespace oceanbase
               {
                 TBSYS_LOG(ERROR, "ObLogReader read error[ret=%d]", ret);
               }
-            }
+            } // end while
 
             // handle exception, when the last log file contain SWITCH_LOG entry
             // but the next log file is missing
@@ -311,7 +313,7 @@ namespace oceanbase
         ret = do_after_recover_check_point();
       }
 
-      //if (OB_SUCCESS == ret)
+      if (OB_SUCCESS == ret)
       {
         ret = start_log(max_log_id_, get_cur_log_seq());
         if (OB_SUCCESS != ret)
@@ -320,12 +322,13 @@ namespace oceanbase
         }
         else
         {
-          TBSYS_LOG(INFO, "start log [%d] done", max_log_id_);
+          TBSYS_LOG(INFO, "start log [%d] done, cur_log_seq=%lu", max_log_id_, get_cur_log_seq());
         }
       }
       return ret;
     }
 
+    // called by slave's fetch_thread when downloaded the remote ckpt file
     int ObRootLogManager::recover_checkpoint(const uint64_t checkpoint_id)
     {
       int ret = OB_SUCCESS;

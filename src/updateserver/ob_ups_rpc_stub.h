@@ -46,13 +46,19 @@ namespace oceanbase
         virtual int sync_schema(const common::ObServer& ups_master, ObSchemaManagerWrapper& schema,
             const int64_t timeout_us);
         // register with Master, called by Slave when it starts up.
-        virtual int slave_register(const common::ObServer& master, const ObSlaveInfo &slave_info,
+        virtual int slave_register_followed(const common::ObServer& master, const ObSlaveInfo &slave_info,
             ObUpsFetchParam& fetch_param, const int64_t timeout_us);
+        virtual int slave_register_standalone(const common::ObServer& master,
+            const uint64_t log_id, const uint64_t log_seq,
+            uint64_t &log_id_res, uint64_t &log_seq_res, const int64_t timeout_us);
         // send freeze memtable resp.
         virtual int send_freeze_memtable_resp(const common::ObServer& root_server,
             const common::ObServer& ups_master, const int64_t schema_timestamp, const int64_t timeout_us);
         virtual int report_freeze(const common::ObServer &root_server,
             const common::ObServer &ups_master, const int64_t frozen_version, const int64_t timeout_us);
+
+        virtual int fetch_lsync(const common::ObServer &lsync, const uint64_t log_id, const uint64_t log_seq,
+            char* &log_data, int64_t &log_len, const int64_t timeout_us);
 
       private:
         int get_thread_buffer_(common::ObDataBuffer& data_buff);

@@ -99,6 +99,26 @@ namespace oceanbase
       int64_t item_id_;
     };
 
+    class KeyInfo
+    {
+    public:
+      KeyInfo(int64_t a, int64_t b)
+      {
+        a_ = a;
+        b_ = b;
+      }
+      void operator= (const KeyInfo &k)
+      {
+        a_ = k.a_;
+        b_ = k.b_;
+      }
+      int32_t operator- (const KeyInfo &k) const
+      {
+        return (int32_t)(a_ - k.a_);
+      }
+      int64_t a_, b_;
+    };
+
     static __inline__ int64_t getTime()
     {
       struct timeval t;

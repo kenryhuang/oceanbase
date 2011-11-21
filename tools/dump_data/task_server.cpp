@@ -303,13 +303,13 @@ int TaskServer::handle_finish_task(ObPacket * packet)
     ret = rpc_->response_finish(OB_SUCCESS, packet);
     if (ret != OB_SUCCESS)
     {
-      TBSYS_LOG(WARN, "send response to client failed:result[%d], ret[%d], task[%lu]", 
-          result, old_ret, task.get_id());
+      TBSYS_LOG(WARN, "send response to client failed:task[%lu], server[%s], result[%d], ret[%d]",
+          task.get_id(), tbsys::CNetUtil::addrToString(peer_id).c_str(), result, old_ret);
     }
     else
     {
-      TBSYS_LOG(INFO, "handle finish task succ:result[%d], ret[%d], task[%lu]", 
-          result, old_ret, task.get_id());
+      TBSYS_LOG(INFO, "handle finish task succ:task[%lu], server[%s], result[%d], ret[%d]", 
+          task.get_id(), tbsys::CNetUtil::addrToString(peer_id).c_str(), result, old_ret);
     }
   }
   

@@ -30,6 +30,9 @@ namespace oceanbase
           INDEX_SUCCESS_SCAN_COUNT = 1,
           INDEX_FAIL_GET_COUNT = 2,
           INDEX_FAIL_SCAN_COUNT = 3,
+          INDEX_GET_OBI_ROLE_COUNT = 4,
+          INDEX_MIGRATE_COUNT = 5,
+          INDEX_COPY_COUNT = 6,
         };
         enum
         {

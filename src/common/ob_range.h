@@ -59,6 +59,7 @@ namespace oceanbase
         inline void set_data(const int8_t data) { data_ = data; }
         inline int8_t get_data() const { return data_; }
 
+        inline bool is_left_open_right_closed() const { return (!inclusive_start() && inclusive_end()) || is_max_value(); }
       private:
         int8_t data_;
     };

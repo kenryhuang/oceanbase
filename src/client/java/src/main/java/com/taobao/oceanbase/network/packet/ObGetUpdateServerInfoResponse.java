@@ -11,6 +11,7 @@ public class ObGetUpdateServerInfoResponse extends BaseResponsePacket {
 
 	public ObGetUpdateServerInfoResponse(int request, byte[] data) {
 		super(PacketCode.OB_GET_UPDATE_SERVER_INFO_RES, request, data);
+		System.err.println("create response for get ups");
 	}
 
 	public void decodeBody() {

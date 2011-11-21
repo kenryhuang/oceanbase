@@ -20,6 +20,7 @@
 #include "ob_log_reader.h"
 #include "ob_role_mgr.h"
 #include "ob_log_entry.h"
+#include "ob_obi_role.h"
 
 namespace oceanbase
 {
@@ -33,7 +34,7 @@ namespace oceanbase
     public:
       ObLogReplayRunnable();
       virtual ~ObLogReplayRunnable();
-      virtual int init(const char* log_dir, const uint64_t log_file_id_start, ObRoleMgr *role_mgr, int64_t replay_wait_time);
+      virtual int init(const char* log_dir, const uint64_t log_file_id_start, const uint64_t log_seq_start, ObRoleMgr *role_mgr, ObiRole *obi_role, int64_t replay_wait_time);
       virtual void run(tbsys::CThread* thread, void* arg);
 
       virtual void set_max_log_file_id(uint64_t max_log_file_id)
@@ -46,12 +47,14 @@ namespace oceanbase
         log_reader_.set_has_no_max();
       }
 
+      void get_cur_replay_point(int64_t& log_file_id, int64_t& log_seq_id, int64_t& log_offset);
     protected:
       virtual int replay(LogCommand cmd, uint64_t seq, const char* log_data, const int64_t data_len) = 0;
 
     protected:
       int64_t replay_wait_time_;
       ObRoleMgr *role_mgr_;
+      ObiRole *obi_role_;
       ObLogReader log_reader_;
       bool is_initialized_;
     };

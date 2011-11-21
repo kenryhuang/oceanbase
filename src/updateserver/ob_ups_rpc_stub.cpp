@@ -158,7 +158,7 @@ namespace oceanbase
       return err;
     }
 
-    int ObUpsRpcStub :: slave_register(const ObServer& master, const ObSlaveInfo &slave_info,
+    int ObUpsRpcStub :: slave_register_followed(const ObServer& master, const ObSlaveInfo &slave_info,
         ObUpsFetchParam& fetch_param, const int64_t timeout_us)
     {
       int err = OB_SUCCESS;
@@ -192,8 +192,7 @@ namespace oceanbase
             OB_SLAVE_REG, DEFAULT_VERSION, timeout_us, data_buff);
         if (err != OB_SUCCESS)
         {
-          TBSYS_LOG(ERROR, "send request to register failed"
-              "err[%d].", err);
+          TBSYS_LOG(WARN, "send request to register failed err[%d].", err);
         }
       }
 
@@ -220,6 +219,79 @@ namespace oceanbase
         if (OB_SUCCESS != err)
         {
           TBSYS_LOG(WARN, "deserialize fetch param failed, err[%d]", err);
+        }
+      }
+
+      return err;
+    }
+
+    int ObUpsRpcStub :: slave_register_standalone(const ObServer& master,
+        const uint64_t log_id, const uint64_t log_seq,
+        uint64_t &log_id_res, uint64_t &log_seq_res, const int64_t timeout_us)
+    {
+      int err = OB_SUCCESS;
+      ObDataBuffer data_buff;
+
+      if (NULL == client_mgr_)
+      {
+        TBSYS_LOG(WARN, "invalid status, client_mgr_[%p]", client_mgr_);
+        err = OB_ERROR;
+      }
+      else
+      {
+        err = get_thread_buffer_(data_buff);
+      }
+
+      // step 1. serialize slave addr
+      if (OB_SUCCESS == err)
+      {
+        if (OB_SUCCESS != (err = serialization::encode_i64(data_buff.get_data(), data_buff.get_capacity(),
+                                                           data_buff.get_position(), (int64_t)log_id)))
+        {
+          TBSYS_LOG(WARN, "log_id serialize error, err=%d", err);
+        }
+        else if (OB_SUCCESS != (err = serialization::encode_i64(data_buff.get_data(), data_buff.get_capacity(),
+                                                                data_buff.get_position(), (int64_t)log_seq)))
+        {
+          TBSYS_LOG(WARN, "log_seq serialize error, err=%d", err);
+        }
+      }
+
+      // step 2. send request to register
+      if (OB_SUCCESS == err)
+      {
+        err = client_mgr_->send_request(master, 
+            OB_SLAVE_REG, DEFAULT_VERSION, timeout_us, data_buff);
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(WARN, "send request to register failed err[%d].", err);
+        }
+      }
+
+      // step 3. deserialize the response code
+      int64_t pos = 0;
+      if (OB_SUCCESS == err)
+      {
+        ObResultCode result_code;
+        err = result_code.deserialize(data_buff.get_data(), data_buff.get_position(), pos);
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(ERROR, "deserialize result_code failed:pos[%ld], err[%d].", pos, err);
+        }
+        else
+        {
+          err = result_code.result_code_;
+          if (OB_SUCCESS == err)
+          {
+            if (OB_SUCCESS != (err = serialization::decode_i64(data_buff.get_data(), data_buff.get_position(), pos, (int64_t*)&log_id_res)))
+            {
+              TBSYS_LOG(ERROR, "deserialize log_id_res error, err=%d", err);
+            }
+            else if (OB_SUCCESS != (err = serialization::decode_i64(data_buff.get_data(), data_buff.get_position(), pos, (int64_t*)&log_seq_res)))
+            {
+              TBSYS_LOG(ERROR, "deserialize log_seq_res error, err=%d", err);
+            }
+          }
         }
       }
 
@@ -342,6 +414,95 @@ namespace oceanbase
         else
         {
           err = result_code.result_code_;
+        }
+      }
+
+      return err;
+    }
+
+    int ObUpsRpcStub :: fetch_lsync(const common::ObServer &lsync, const uint64_t log_id, const uint64_t log_seq,
+        char* &log_data, int64_t &log_len, const int64_t timeout_us)
+    {
+      int err = OB_SUCCESS;
+
+      ObDataBuffer data_buff;
+
+      if (NULL == client_mgr_)
+      {
+        TBSYS_LOG(WARN, "invalid status, client_mgr_[%p]", client_mgr_);
+        err = OB_ERROR;
+      }
+      else
+      {
+        err = get_thread_buffer_(data_buff);
+      }
+
+      // step 1. serialize info
+      if (OB_SUCCESS == err)
+      {
+        if (OB_SUCCESS != (err = serialization::encode_i64(data_buff.get_data(), data_buff.get_capacity(),
+            data_buff.get_position(), (int64_t)log_id)))
+        {
+          TBSYS_LOG(WARN, "Serialize log_id error, err=%d", err);
+        }
+        else if (OB_SUCCESS != (err = serialization::encode_i64(data_buff.get_data(), data_buff.get_capacity(),
+                 data_buff.get_position(), (int64_t)log_seq)))
+        {
+          TBSYS_LOG(WARN, "Serialize log_seq error, err=%d", err);
+        }
+      }
+
+      // step 2. send request to register
+      if (OB_SUCCESS == err)
+      {
+        int64_t send_bgn_time = tbsys::CTimeUtil::getMonotonicTime();
+
+        err = client_mgr_->send_request(lsync,
+            OB_LSYNC_FETCH_LOG, DEFAULT_VERSION, timeout_us, data_buff);
+        if (OB_SUCCESS != err && OB_RESPONSE_TIME_OUT != err)
+        {
+          TBSYS_LOG(ERROR, "send request to lsync failed err[%d].", err);
+        }
+        else if (OB_RESPONSE_TIME_OUT == err)
+        {
+          int64_t send_end_time = tbsys::CTimeUtil::getMonotonicTime();
+          int64_t left_time = timeout_us - (send_end_time - send_bgn_time);
+          if (left_time > 0)
+          {
+            usleep(left_time);
+          }
+        }
+      }
+
+      // step 3. deserialize the response code
+      int64_t pos = 0;
+      if (OB_SUCCESS == err)
+      {
+        ObResultCode result_code;
+        err = result_code.deserialize(data_buff.get_data(), data_buff.get_position(), pos);
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(ERROR, "deserialize result_code failed:pos[%ld], err[%d].", pos, err);
+        }
+        else if (OB_SUCCESS != (err = result_code.result_code_) && OB_NEED_RETRY != err)
+        {
+          TBSYS_LOG(ERROR, "result_code is error: result_code_=%d", result_code.result_code_);
+        }
+        else if (OB_NEED_RETRY == err)
+        {
+          TBSYS_LOG(DEBUG, "no data, retry");
+        }
+        else
+        {
+          if (OB_SUCCESS != (err = serialization::decode_i64(data_buff.get_data(), data_buff.get_position(), pos, (int64_t*)&log_len)))
+          {
+            TBSYS_LOG(WARN, "Deserialize log_len error, err=%d", err);
+          }
+          else
+          {
+            log_data = data_buff.get_data() + pos;
+            TBSYS_LOG(DEBUG, "log_data=%p log_len=%ld", log_data, log_len);
+          }
         }
       }
 

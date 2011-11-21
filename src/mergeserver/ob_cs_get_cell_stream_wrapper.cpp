@@ -13,23 +13,23 @@
  *   wushi <wushi.ly@taobao.com>
  *
  */
-#include "ob_cs_get_cell_stream_wrapper.h"
-#include "common/ob_define.h"
+
 #include "tbsys.h"
-using namespace oceanbase;
+#include "common/ob_define.h"
+#include "ob_cs_get_cell_stream_wrapper.h"
+
 using namespace oceanbase::common;
 using namespace oceanbase::mergeserver;
 
-oceanbase::mergeserver::ObMSGetCellStreamWrapper::ObMSGetCellStreamWrapper(const int64_t retry_times,
-                                                                           const int64_t timeout,  
-                                                                           const ObServer & update_server)
-:rpc_proxy_(retry_times, timeout,root_server_,update_server,merge_server_), 
-  get_cell_stream_(&rpc_proxy_),  scan_cell_stream_(&rpc_proxy_)
+ObMSUpsStreamWrapper::ObMSUpsStreamWrapper(const int64_t retry_times,
+    const int64_t timeout, const ObServer & root_server)
+    :rpc_proxy_(retry_times, timeout, root_server, update_server_,
+    merge_server_, common::CHUNK_SERVER)
 {
   schema_mgr_ = NULL;
 }
 
-oceanbase::mergeserver::ObMSGetCellStreamWrapper::~ObMSGetCellStreamWrapper()
+ObMSUpsStreamWrapper::~ObMSUpsStreamWrapper()
 {
   if (schema_mgr_ != NULL)
   {
@@ -38,8 +38,14 @@ oceanbase::mergeserver::ObMSGetCellStreamWrapper::~ObMSGetCellStreamWrapper()
   }
 }
 
-int oceanbase::mergeserver::ObMSGetCellStreamWrapper::init(const ThreadSpecificBuffer * rpc_buffer, 
-                                                           const ObClientManager * rpc_frame)
+void ObMSUpsStreamWrapper::set_update_server(const ObServer & server)
+{
+  update_server_ = server;
+  rpc_proxy_.set_update_server(update_server_);
+}
+
+int ObMSUpsStreamWrapper::init(const ThreadSpecificBuffer * rpc_buffer,
+    const ObClientManager * rpc_frame)
 {
   int err  = OB_SUCCESS;
   if (NULL == rpc_buffer || NULL == rpc_frame )
@@ -47,6 +53,7 @@ int oceanbase::mergeserver::ObMSGetCellStreamWrapper::init(const ThreadSpecificB
     TBSYS_LOG(WARN,"param error [rpc_buffer:%p,rpc_frame:%p]", rpc_buffer, rpc_frame);
     err = OB_INVALID_ARGUMENT;
   }
+  
   if (OB_SUCCESS == err)
   {
     char *schema_mgr_buffer = reinterpret_cast<char*>(ob_malloc(sizeof(ObMergerSchemaManager)));
@@ -68,20 +75,33 @@ int oceanbase::mergeserver::ObMSGetCellStreamWrapper::init(const ThreadSpecificB
 
   if (OB_SUCCESS == err)
   {
-    err = rpc_proxy_.init(&rpc_stub_,schema_mgr_,&location_cache_);
+    err = rpc_proxy_.init(&rpc_stub_, schema_mgr_, &location_cache_);
   }
   return err;
 }
 
+ObMergerRpcProxy * ObMSUpsStreamWrapper::get_ups_rpc_proxy()
+{
+  return &rpc_proxy_;
+}
 
-ObMSGetCellStream *oceanbase::mergeserver::ObMSGetCellStreamWrapper::get_ups_get_cell_stream()
+ObMSGetCellStreamWrapper::ObMSGetCellStreamWrapper(ObMSUpsStreamWrapper & ups_stream)
+    :get_cell_stream_(ups_stream.get_ups_rpc_proxy()),
+    scan_cell_stream_(ups_stream.get_ups_rpc_proxy())
+{
+}
+
+ObMSGetCellStreamWrapper::~ObMSGetCellStreamWrapper()
+{
+}
+
+ObMSGetCellStream * ObMSGetCellStreamWrapper::get_ups_get_cell_stream()
 {
   return &get_cell_stream_;
 }
 
-ObMSScanCellStream *oceanbase::mergeserver::ObMSGetCellStreamWrapper::get_ups_scan_cell_stream()
+ObMSScanCellStream * ObMSGetCellStreamWrapper::get_ups_scan_cell_stream()
 {
   return &scan_cell_stream_;
 }
-
 

@@ -60,6 +60,10 @@ void ObCheckRunnable::run(tbsys::CThread* thread, void* arg)
         {
           role_mgr_->set_state(ObRoleMgr::SWITCHING);
         }
+        else
+        {
+          TBSYS_LOG(ERROR, "vip found on slave, but slave lease is invalid, vip=%s", inet_ntoa(vip_addr));
+        }
       }
     }
     else

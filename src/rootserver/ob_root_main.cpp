@@ -15,7 +15,7 @@
  */
 
 #include "rootserver/ob_root_main.h"
-#include "rootserver/ob_root_signal.h"
+
 namespace 
 {
     const char* STR_ROOT_SECTION = "root_server";
@@ -40,22 +40,34 @@ namespace oceanbase
     {
       if (instance_ == NULL)
       {
-        instance_ = new ObRootMain();
+        instance_ = new (std::nothrow)ObRootMain();
       }
       return instance_;
     }
 
 void ObRootMain::print_version()
 {
-  fprintf(stderr, "rootserver (%s)\n", PACKAGE_STRING);
+  fprintf(stderr, "rootserver (%s %s)\n", PACKAGE_STRING, RELEASEID);
   fprintf(stderr, "SVN_VERSION: %s\n", svn_version());
   fprintf(stderr, "BUILD_TIME: %s %s\n\n", build_date(), build_time());
+  fprintf(stderr, "Copyright (c) 2007-2011 Taobao Inc.\n");
 }
+
+    static const int START_REPORT_SIG = 49;
+    static const int START_MERGE_SIG = 50;
+    static const int DUMP_ROOT_TABLE_TO_LOG = 51;
+    static const int DUMP_AVAILABLE_SEVER_TO_LOG = 52;
+    static const int SWITCH_SCHEMA = 53;
+    static const int RELOAD_CONFIG = 54;
+    static const int DO_CHECK_POINT = 55;
+    static const int DROP_CURRENT_MERGE = 56;
+    static const int CREATE_NEW_TABLE = 57;
 
     int ObRootMain::do_work()
     {
       //add signal I want to catch
-      //add_signal_catched(START_REPORT_SIG);
+      // we don't process the following signals any more, but receive them for backward compatibility
+      add_signal_catched(START_REPORT_SIG);
       add_signal_catched(START_MERGE_SIG);
       add_signal_catched(DUMP_ROOT_TABLE_TO_LOG);
       add_signal_catched(DUMP_AVAILABLE_SEVER_TO_LOG);
@@ -63,6 +75,8 @@ void ObRootMain::print_version()
       add_signal_catched(RELOAD_CONFIG);
       add_signal_catched(DO_CHECK_POINT);
       add_signal_catched(DROP_CURRENT_MERGE);
+      add_signal_catched(CREATE_NEW_TABLE);
+
       int ret = OB_SUCCESS;
       int port = TBSYS_CONFIG.getInt(STR_ROOT_SECTION, STR_LISTEN_PORT, 0);
       ret = worker.set_listen_port(port);
@@ -83,11 +97,14 @@ void ObRootMain::print_version()
       {
         ret = worker.start();
       }
+      if (OB_SUCCESS != ret)
+      {
+        fprintf(stderr, "failed to start rootserver, see the log for details, err=%d\n", ret);
+      }
       return ret;
     }
     void ObRootMain::do_signal(const int sig)
     {
-      bool ret = false;
       switch(sig)
       {
         case SIGTERM:
@@ -95,76 +112,8 @@ void ObRootMain::print_version()
           TBSYS_LOG(INFO, "stop signal received");
           worker.stop();
           break;
-       // case START_REPORT_SIG:
-       //   if (worker.is_master())
-       //   {
-       //     TBSYS_LOG(INFO, "start_report signal received");
-       //     ret = worker.start_report(); 
-       //     if (ret)
-       //       TBSYS_LOG(INFO, "start_report signal ok");
-       //     else
-       //       TBSYS_LOG(INFO, "start_report signal fail");
-       //   }
-       //   else
-       //   {
-       //     TBSYS_LOG(INFO, "only master can take signal report");
-       //   }
-
-       //   break;
-        case START_MERGE_SIG:
-          if (worker.is_master())
-          {
-            TBSYS_LOG(INFO, "start_merge signal received");
-            ret = worker.start_merge();
-            if (ret)
-              TBSYS_LOG(INFO, "start_merge signal ok");
-            else
-              TBSYS_LOG(INFO, "start_merge signal fail");
-          }
-          else
-          {
-            TBSYS_LOG(INFO, "only master can take signal merge");
-          }
-          break;
-        case DROP_CURRENT_MERGE:
-          if (worker.is_master())
-          {
-            TBSYS_LOG(INFO, "DROP_CURRENT_MERGE signal received");
-            worker.drop_current_merge();
-          }
-          else
-          {
-            TBSYS_LOG(INFO, "only master can take signal DROP_CURRENT_MERGE");
-          }
-          break;
-        case DUMP_ROOT_TABLE_TO_LOG:
-          TBSYS_LOG(INFO, "DUMP_ROOT_TABLE_TO_LOG signal received");
-          worker.dump_root_table();
-          break;
-        case DUMP_AVAILABLE_SEVER_TO_LOG:
-          TBSYS_LOG(INFO, "DUMP_AVAILABLE_SEVER_TO_LOG signal received");
-          worker.dump_available_server();
-          break;
-        case SWITCH_SCHEMA:
-          TBSYS_LOG(INFO, "SWITCH_SCHEMA signal received");
-          worker.use_new_schema();
-          break;
-        case RELOAD_CONFIG:
-          TBSYS_LOG(INFO, "RELOAD_CONFIG signal received");
-          worker.reload_config();
-          break;
-        case DO_CHECK_POINT:
-          TBSYS_LOG(INFO, "DO_CHECK_POINT signal received");
-          if (worker.is_master()) {
-            int ret = worker.get_log_manager()->do_check_point();
-            TBSYS_LOG(INFO, "do check point return: %d", ret);
-          } else
-          {
-            TBSYS_LOG(INFO, "I am slave, operate rejected");
-          }
-          break;
-
         default:
+          TBSYS_LOG(WARN, "unknown signal ignored, sig=%d", sig);
           break;
       }
     }

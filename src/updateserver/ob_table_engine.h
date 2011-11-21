@@ -169,7 +169,7 @@ namespace oceanbase
     {
       int16_t cell_info_cnt;
       int8_t row_stat;
-      int8_t reserve1;
+      int8_t update_count;
       int16_t cell_info_size; // 单位为1K
       int16_t reserve2;
       ObCellInfoNode *list_head;
@@ -194,6 +194,8 @@ namespace oceanbase
       {
         cell_info_cnt = 0;
         row_stat = ROW_ST_UNKNOW;
+        update_count = 0;
+        cell_info_size = 0;
         list_head = NULL;
         list_tail = NULL;
         create_time = 0;
@@ -204,8 +206,8 @@ namespace oceanbase
         static const int32_t BUFFER_SIZE = 2048;
         static __thread char BUFFER[2][BUFFER_SIZE];
         static __thread int64_t i = 0;
-        snprintf(BUFFER[i % 2], BUFFER_SIZE, "cell_info_cnt=%hd row_stat=%hhd cell_info_size=%hdKB list_head=%p list_tail=%p create_time=%s modify_time=%s",
-                cell_info_cnt, row_stat, cell_info_size, list_head, list_tail, time2str(create_time), time2str(modify_time));
+        snprintf(BUFFER[i % 2], BUFFER_SIZE, "cell_info_cnt=%hd row_stat=%hhd update_count=%hhd cell_info_size=%hdKB list_head=%p list_tail=%p create_time=%s modify_time=%s",
+                cell_info_cnt, row_stat, update_count, cell_info_size, list_head, list_tail, time2str(create_time), time2str(modify_time));
         return BUFFER[i++ % 2];
       };
     };

@@ -960,6 +960,11 @@ namespace oceanbase
               free_list_.set_max_alloc_size(total_mb_num_ * MemBlock::MEM_BLOCK_SIZE);
               inited_ = true;
             }
+            else
+            {
+              TBSYS_LOG(ERROR, "failed to allocate memory for memblock info");
+              ret = OB_ALLOCATE_MEMORY_FAILED;
+            }
           }
           return ret;
         };
@@ -1666,6 +1671,44 @@ namespace oceanbase
         {
           return store_.get_miss_cnt();
         };
+      private:
+        int internal_put(const Key &key, const Value &value, StoreHandle& store_handle, bool overwrite = true)
+        {
+          int ret = OB_SUCCESS;
+          Key *pkey = NULL;
+          if (!inited_)
+          {
+            ret = OB_NOT_INIT;
+          }
+          else if (!overwrite && hash::HASH_EXIST == (ret = map_.get(key, store_handle)))
+          {
+            ret = OB_ENTRY_EXIST;
+          }
+          else if (OB_SUCCESS != (ret = store_.store(key, value, store_handle, &pkey))
+                  || NULL == pkey)
+          {
+            TBSYS_LOG(WARN, "store key-value fail ret=%d", ret);
+            if (OB_SUCCESS == ret)
+            {
+              store_.revert(store_handle);
+              ret = OB_ERROR;
+            }
+          }
+          else
+          {
+            int hash_ret = map_.set(*pkey, store_handle.copy_without_stat(), 1, 1);
+            if (hash::HASH_OVERWRITE_SUCC == hash_ret || hash::HASH_INSERT_SUCC == hash_ret)
+            {
+              ret = OB_SUCCESS;
+            }
+            else
+            {
+              store_.revert(store_handle);
+              ret = OB_ERROR;
+            }
+          }
+          return ret;
+        };
       public:
         /**
          * default the overwrite param is true, it means that if the key 
@@ -1702,41 +1745,34 @@ namespace oceanbase
         {
           int ret = OB_SUCCESS;
           StoreHandle store_handle;
-          Key *pkey = NULL;
-          if (!inited_)
-          {
-            ret = OB_NOT_INIT;
-          }
-          else if (!overwrite && hash::HASH_EXIST == (ret = map_.get(key, store_handle)))
-          {
-            ret = OB_ENTRY_EXIST;
-          }
-          else if (OB_SUCCESS != (ret = store_.store(key, value, store_handle, &pkey))
-                  || NULL == pkey)
-          {
-            TBSYS_LOG(WARN, "store key-value fail ret=%d", ret);
+          
+          ret = internal_put(key, value, store_handle, overwrite);
             if (OB_SUCCESS == ret)
             {
               store_.revert(store_handle);
-              ret = OB_ERROR;
-            }
+          }
+
+          return ret;
+        };
+        int put_and_fetch(const Key &key, const Value &input_value, Value &output_value,  
+                          CacheHandle &handle, bool overwrite = true, bool only_cache = true)
+        {
+          int ret = OB_SUCCESS;
+          StoreHandle store_handle;
+          
+          ret = internal_put(key, input_value, store_handle, overwrite);
+          if (OB_SUCCESS == ret)
+          {
+            ret = get(key, output_value, handle, only_cache);
+            store_.revert(store_handle);
+          }
+          else if (OB_ENTRY_EXIST == ret && !overwrite)
+          {
+            ret = get(key, output_value, handle, only_cache);
           }
           else
           {
-            int hash_ret = map_.set(*pkey, store_handle.copy_without_stat(), 1, 1);
-            if (hash::HASH_OVERWRITE_SUCC == hash_ret)
-            {
-              ret = OB_SUCCESS;
-            }
-            else if (hash::HASH_INSERT_SUCC == hash_ret)
-            {
-              ret = OB_SUCCESS;
-            }
-            else
-            {
-              ret = OB_ERROR;
-            }
-            store_.revert(store_handle);
+            TBSYS_LOG(WARN, "failed to put key-value into kvcache, ret=%d", ret);
           }
           return ret;
         };
@@ -1820,7 +1856,11 @@ namespace oceanbase
                 }
                 else if (OB_ENTRY_NOT_EXIST == ret)
                 {
-                  if (hash::HASH_EXIST != (hash_ret = map_.get(key, handle.store_handle, DEFAULT_TIMEOUT_US)))
+                  if (only_cache)
+                  {
+                    break;
+                  }
+                  else if (hash::HASH_EXIST != (hash_ret = map_.get(key, handle.store_handle, DEFAULT_TIMEOUT_US)))
                   {
                     ret = OB_ENTRY_NOT_EXIST;
                     break;

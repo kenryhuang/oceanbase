@@ -29,7 +29,6 @@
 #include "common/page_arena.h"
 #include "common/hash/ob_hashmap.h"
 #include "common/ob_file.h"
-#include "ob_memtank.h"
 
 #define DEFAULT_TIME_FORMAT "%Y-%m-%d %H:%M:%S"
 
@@ -43,6 +42,7 @@ namespace oceanbase
 
     class TEKey;
     class TEValue;
+    struct CacheWarmUpConf;
     extern const char *print_obj(const common::ObObj &obj);
     extern const char *print_string(const common::ObString &str);
     extern const char *print_cellinfo(const common::ObCellInfo *ci, const char *ext_info = NULL);
@@ -54,6 +54,15 @@ namespace oceanbase
     extern int precise_sleep(const int64_t microsecond);
     extern bool str_isprint(const char *str, const int64_t length);
     extern const char *inet_ntoa_r(const uint64_t ipport);
+    extern int64_t get_max_row_cell_num();
+    extern int64_t get_table_available_warn_size();
+    extern int64_t get_table_available_error_size();
+    extern int64_t get_table_memory_limit();
+    extern bool ups_available_memory_warn_callback(const int64_t mem_size_available);
+    extern const CacheWarmUpConf &get_warm_up_conf();
+    extern void set_warm_up_percent(const int64_t warm_up_percent);
+    extern void submit_force_drop();
+    extern void schedule_warm_up_duty();
 
     template <class T>
     int ups_serialize(const T &data, char *buf, const int64_t data_len, int64_t& pos)
@@ -113,9 +122,9 @@ namespace oceanbase
     {
       int64_t low_priv_network_lower_limit;
       int64_t low_priv_network_upper_limit;
-      int64_t high_priv_max_wait_time_ms;
-      int64_t high_priv_adjust_time_ms;
-      int64_t high_priv_cur_wait_time_ms;
+      int64_t low_priv_adjust_flag;
+      int64_t low_priv_cur_percent;
+      int64_t low_priv_max_percent;
 
       int serialize(char* buf, const int64_t buf_len, int64_t& pos) const
       {
@@ -195,6 +204,49 @@ namespace oceanbase
       int64_t get_serialize_size(void) const
       {
         return sizeof(*this);
+      };
+    };
+
+    struct CacheWarmUpConf
+    {
+      static const int64_t STOP_PERCENT = 100; // 100%
+      static const int64_t STEP_PERCENT = 1; // 1%
+      static const int64_t DEFAULT_WARM_UP_TIME_S = 600; //10min
+      static const int64_t MIN_WARM_UP_TIME_S = 10; // 10s
+      static const int64_t MAX_WARM_UP_TIME_S = 1800; // 30min
+
+      // 预热时间(默认10分钟)
+      int64_t warm_up_time_s;
+      // 读取sstable的比例两次步进的时间间隔(根据warm_up_time_us计算出)
+      int64_t warm_up_step_interval_us;
+
+      CacheWarmUpConf() : warm_up_time_s(DEFAULT_WARM_UP_TIME_S),
+                          warm_up_step_interval_us(DEFAULT_WARM_UP_TIME_S * 1000L * 1000L / (STOP_PERCENT / STEP_PERCENT))
+      {
+      };
+
+      bool check()
+      {
+        bool bret = false;
+        if (0 == warm_up_time_s)
+        {
+          warm_up_step_interval_us = 0;
+          bret = true;
+        }
+        else if (MIN_WARM_UP_TIME_S > warm_up_time_s)
+        {
+          TBSYS_LOG(WARN, "warm_up_time_s=%ld cannot smaller than %ld", warm_up_time_s, MIN_WARM_UP_TIME_S);
+        }
+        else if (MAX_WARM_UP_TIME_S < warm_up_time_s)
+        {
+          TBSYS_LOG(WARN, "warm_up_time_s=%ld cannot larger than %ld", warm_up_time_s, MAX_WARM_UP_TIME_S);
+        }
+        else
+        {
+          warm_up_step_interval_us = warm_up_time_s * 1000L * 1000L / (STOP_PERCENT / STEP_PERCENT);
+          bret = true;
+        }
+        return bret;
       };
     };
   }

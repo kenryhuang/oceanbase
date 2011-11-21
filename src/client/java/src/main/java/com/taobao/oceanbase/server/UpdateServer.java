@@ -36,36 +36,36 @@ public class UpdateServer {
 		return seq != 0 ? seq : getRequest();
 	}
 
-	public Result<Boolean> insert(InsertMutator mutator) {
-		ObMutator obMutator = new ObMutator(mutator.getColumns().size(),
-				ObActionFlag.OP_USE_OB_SEM);
-		for (InsertMutator.Tuple column : mutator.getColumns()) {
-			ObCell cell = new ObCell(mutator.getTable(), mutator.getRowkey(),
-					column.name, column.value.getObject(false));
-			obMutator.addCell(cell, ObActionFlag.OP_INSERT);
-		}
-		return apply(obMutator);
-	};
-
-	public Result<Boolean> update(UpdateMutator mutator) {
-		ObMutator obMutator = new ObMutator(mutator.getColumns().size(),
-				ObActionFlag.OP_USE_OB_SEM);
-		for (UpdateMutator.Tuple column : mutator.getColumns()) {
-			ObCell cell = new ObCell(mutator.getTable(), mutator.getRowkey(),
-					column.name, column.value.getObject(column.add));
-			obMutator.addCell(cell, ObActionFlag.OP_UPDATE);
-		}
-		return apply(obMutator);
-	};
-
-	public Result<Boolean> delete(String table, String rowkey) {
-		ObMutator mutator = new ObMutator(1, ObActionFlag.OP_USE_OB_SEM);
-		ObObj op = new ObObj();
-		op.setExtend(ObActionFlag.OP_DEL_ROW);
-		mutator.addCell(new ObCell(table, rowkey, null, op),
-				ObActionFlag.OP_DEL_ROW);
-		return apply(mutator);
-	};
+//	public Result<Boolean> insert(InsertMutator mutator) {
+//		ObMutator obMutator = new ObMutator(mutator.getColumns().size(),
+//				ObActionFlag.OP_USE_OB_SEM);
+//		for (InsertMutator.Tuple column : mutator.getColumns()) {
+//			ObCell cell = new ObCell(mutator.getTable(), mutator.getRowkey(),
+//					column.name, column.value.getObject(false));
+//			obMutator.addCell(cell, ObActionFlag.OP_INSERT);
+//		}
+//		return apply(obMutator);
+//	};
+//
+//	public Result<Boolean> update(UpdateMutator mutator) {
+//		ObMutator obMutator = new ObMutator(mutator.getColumns().size(),
+//				ObActionFlag.OP_USE_OB_SEM);
+//		for (UpdateMutator.Tuple column : mutator.getColumns()) {
+//			ObCell cell = new ObCell(mutator.getTable(), mutator.getRowkey(),
+//					column.name, column.value.getObject(column.add));
+//			obMutator.addCell(cell, ObActionFlag.OP_UPDATE);
+//		}
+//		return apply(obMutator);
+//	};
+//
+//	public Result<Boolean> delete(String table, String rowkey) {
+//		ObMutator mutator = new ObMutator(1, ObActionFlag.OP_USE_OB_SEM);
+//		ObObj op = new ObObj();
+//		op.setExtend(ObActionFlag.OP_DEL_ROW);
+//		mutator.addCell(new ObCell(table, rowkey, null, op),
+//				ObActionFlag.OP_DEL_ROW);
+//		return apply(mutator);
+//	};
 
 	public Result<Boolean> apply(ObMutator mutator) {
 		BasePacket packet = new WritePacket(getRequest(), mutator);

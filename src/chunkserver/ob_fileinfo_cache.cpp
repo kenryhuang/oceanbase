@@ -153,20 +153,22 @@ namespace oceanbase
           TBSYS_LOG(WARN, "init file info fail sstable_id=%lu", sstable_id);
           ret = NULL;
         }
-        else if (OB_SUCCESS != (tmp_ret = cache_.put(sstable_id, &file_info, false)))
-        {
-          TBSYS_LOG(WARN, "put file info to cache fail ret=%d sstable_id=%lu", 
-                    tmp_ret, sstable_id);
-          ret = NULL;
-        }
         else
         {
-          tmp_ret = cache_.get(sstable_id, ret, tmp_handle, false);
-          if (OB_SUCCESS == tmp_ret && NULL != ret)
+          tmp_ret = cache_.put_and_fetch(sstable_id, &file_info, ret, 
+                                         tmp_handle, false, false);
+          if (OB_SUCCESS != tmp_ret && NULL == ret)
           {
-            ret->set_cache_handle(tmp_handle);
+            TBSYS_LOG(WARN, "failed to put and fetch file info, sstable_id=%lu, "
+                            "err=%d, ret=%p",
+                      sstable_id, tmp_ret, ret);
           }
         }
+      }
+
+      if (OB_SUCCESS == tmp_ret && NULL != ret)
+      {
+        ret->set_cache_handle(tmp_handle);
       }
 
       return ret;

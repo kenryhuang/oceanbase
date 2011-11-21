@@ -328,6 +328,7 @@ TEST_F(TestRpcProxy, test_schema)
 }
 */
 
+
 TEST_F(TestRpcProxy, test_ups)
 {
   ObMergerRpcStub stub;
@@ -486,7 +487,7 @@ TEST_F(TestRpcProxy, test_cs)
   // init tablet cache 
   char temp_end[256] = "";
   ObServer server;
-  const uint64_t START_ROW = 100L;
+  const uint64_t START_ROW = 200L;
   const uint64_t MAX_ROW = 790L;
   for (uint64_t i = START_ROW; i < MAX_ROW - 100; i += 100)
   {
@@ -549,7 +550,7 @@ TEST_F(TestRpcProxy, test_cs)
 
   // cache server not exist so fetch from root server error 
   ObMergerTabletLocationList addr_temp;
-  EXPECT_TRUE(OB_SUCCESS == location->get(234, row_key, addr_temp));
+  EXPECT_TRUE(OB_SUCCESS != location->get(234, row_key, addr_temp));
 
   // scan from root server
   EXPECT_TRUE(OB_SUCCESS == proxy.cs_get(get_param, succ_addr, scanner, it));

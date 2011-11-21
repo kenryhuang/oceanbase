@@ -7,10 +7,8 @@
  * 
  * Version: $Id$
  *
- * ob_root_worker.cpp for ...
- *
  * Authors:
- *   daoan <daoan@taobao.com>
+ *    zhuweng.yzk <zhuweng.yzk@taobao.com>
  *
  */
 
@@ -25,7 +23,12 @@
 #include "common/ob_read_common_data.h"
 #include "common/ob_scanner.h"
 #include "common/utility.h"
+#include "common/ob_atomic.h"
 #include "rootserver/ob_root_worker.h"
+#include "rootserver/ob_root_admin_cmd.h"
+#include "rootserver/ob_root_stat_key.h"
+#include <sys/types.h>
+#include <unistd.h>
 //#define PRESS_TEST
 
 namespace 
@@ -39,7 +42,6 @@ namespace
   const int64_t DEFAULT_LOG_SYNC_LIMIT_KB = 1024 * 40;
   const int64_t DEFAULT_LOG_SYNC_TIMEOUT_US = 500 * 1000;
   const int64_t DEFAULT_REPLAY_WAIT_TIME_US = 100L * 1000; // 100ms
-  const int64_t DEFAULT_REGISTER_TIMES = 10;
   const int64_t DEFAULT_REGISTER_TIMEOUT_US = 3L * 1000 * 1000; // 3s
   const int64_t DEFAULT_LEASE_ON = 1; // default to on
   const int64_t DEFAULT_LEASE_INTERVAL_US = 8 * 1000 * 1000; // 5 seconds
@@ -58,14 +60,13 @@ namespace
   const char* STR_LOG_SYNC_LIMIT_KB = "log_sync_limit_kb";
   const char* STR_LOG_SYNC_TIMEOUT_US = "log_sync_timeout_us";
   const char* STR_REPLAY_WAIT_TIME_US = "replay_wait_time_us";
-  const char* STR_REGISTER_TIMES = "register_times";
   const char* STR_REGISTER_TIMEOUT_US = "register_timeout_us";
   const char* STR_VIP_CHECK_PERIOD_US = "vip_check_period_us";
 
   const char* STR_LEASE_ON = "lease_on";
   const char* STR_LEASE_INTERVAL_US = "lease_interval_us";
   const char* STR_LEASE_RESERVED_TIME_US = "lease_reserved_time_us";
-
+  const char* STR_EXPECTED_PROCESS_US = "expected_process_us";
   const int64_t PACKET_TIME_OUT = 100 * 1000;  //100 ms
   const int32_t ADDR_BUF_LEN = 64;
 }
@@ -75,6 +76,31 @@ namespace oceanbase
   namespace rootserver
   {
     using namespace oceanbase::common;
+
+    //inet_ntoa_r(conn->getPeerId())
+    const char *inet_ntoa_r(const uint64_t ipport)
+    {
+      static const int64_t BUFFER_SIZE = 32;
+      static __thread char buffers[2][BUFFER_SIZE];
+      static __thread int64_t i = 0;
+      char *buffer = buffers[i++ % 2];
+      buffer[0] = '\0';
+
+      uint32_t ip = (uint32_t)(ipport & 0xffffffff);
+      int port = (int)((ipport >> 32 ) & 0xffff);
+      unsigned char *bytes = (unsigned char *) &ip;
+      if (port > 0)
+      {
+        snprintf(buffer, BUFFER_SIZE, "%d.%d.%d.%d:%d", bytes[0], bytes[1], bytes[2], bytes[3], port);
+      }
+      else
+      {
+        snprintf(buffer, BUFFER_SIZE, "%d.%d.%d.%d:-1", bytes[0], bytes[1], bytes[2], bytes[3]);
+      }
+
+      return buffer;
+    }
+
     OBRootWorker::OBRootWorker()
       :is_registered_(false),
       task_read_queue_size_(DEFAULT_TASK_READ_QUEUE_SIZE),
@@ -105,14 +131,10 @@ namespace oceanbase
 
       if (OB_SUCCESS == ret)
       {
-        ret = rt_rpc_stub_.init(&client_manager);
+        ret = rt_rpc_stub_.init(&client_manager, &my_thread_buffer);
         if (OB_SUCCESS != ret)
         {
           TBSYS_LOG(WARN, "init rpc stub failed, err=%d", ret);
-        }
-        else
-        {
-          rt_rpc_stub_.set_root_worker(this);
         }
       }
 
@@ -137,6 +159,20 @@ namespace oceanbase
           ret = OB_ERROR;
         }
       }    
+
+      if (OB_SUCCESS == ret)
+      {
+        expected_process_us_ = TBSYS_CONFIG.getInt(STR_ROOT_SECTION, STR_EXPECTED_PROCESS_US, 10000);
+        if (0 >= expected_process_us_)
+        {
+          TBSYS_LOG(ERROR, "invalid expected_process_us_=%ld", expected_process_us_);
+          ret = OB_INVALID_ARGUMENT;
+        }
+        else
+        {
+          TBSYS_LOG(INFO, "expected_process_us=%ld", expected_process_us_);
+        }
+      }
 
       if (OB_SUCCESS == ret)
       {
@@ -278,14 +314,26 @@ namespace oceanbase
     {
       int err = OB_SUCCESS;
 
-      log_thread_queue_.start();
+      // get obi role from the master
+      if (err == OB_SUCCESS)
+      {
+        err = get_obi_role_from_master();
+      }
 
+      log_thread_queue_.start();
       err = log_manager_.init(&root_server_, &slave_mgr_);
 
       ObFetchParam fetch_param;
       if (err == OB_SUCCESS)
       {
         err = slave_register_(fetch_param);
+      }
+
+      if (err == OB_SUCCESS)
+      {
+        int64_t replay_wait_time = TBSYS_CONFIG.getInt(STR_ROOT_SECTION, STR_REPLAY_WAIT_TIME_US, DEFAULT_REPLAY_WAIT_TIME_US);
+        err = log_replay_thread_.init(log_manager_.get_log_dir_path(), fetch_param.min_log_id_, 0, &role_mgr_, NULL, replay_wait_time);
+        log_replay_thread_.set_log_manager(&log_manager_);
       }
 
       if (err == OB_SUCCESS)
@@ -299,6 +347,7 @@ namespace oceanbase
           fetch_thread_.add_ckpt_ext(ObRootServer2::CHUNKSERVER_LIST_EXT); // add chunkserver list file
           fetch_thread_.set_log_manager(&log_manager_);
           fetch_thread_.start();
+          TBSYS_LOG(INFO, "slave fetch_thread started");
 
           if (fetch_param.fetch_ckpt_)
           {
@@ -314,24 +363,21 @@ namespace oceanbase
       if (err == OB_SUCCESS)
       {
         role_mgr_.set_state(ObRoleMgr::ACTIVE);
+        // we SHOULD start root_modifier after recover checkpoint
         root_server_.start_threads();
         root_server_.wait_init_finished();
+        TBSYS_LOG(INFO, "slave root_table_modifier, balance_worker, heartbeat_checker threads started");
       }
-      
+
+      // we SHOULD start replay thread after wait_init_finished
       if (err == OB_SUCCESS)
+      {  
+        log_replay_thread_.start();
+        TBSYS_LOG(INFO, "slave log_replay_thread started");
+      }
+      else
       {
-        int64_t replay_wait_time = TBSYS_CONFIG.getInt(STR_ROOT_SECTION, STR_REPLAY_WAIT_TIME_US, DEFAULT_REPLAY_WAIT_TIME_US);
-        err = log_replay_thread_.init(log_manager_.get_log_dir_path(), fetch_param.min_log_id_, &role_mgr_, replay_wait_time);
-        if (err == OB_SUCCESS)
-        {
-          log_replay_thread_.set_log_manager(&log_manager_);
-          log_replay_thread_.start();
-          TBSYS_LOG(INFO, "slave log_replay_thread started");
-        }
-        else
-        {
-          TBSYS_LOG(ERROR, "failed to start log replay thread");
-        }
+        TBSYS_LOG(ERROR, "failed to start log replay thread");
       }
 
       if (err == OB_SUCCESS)
@@ -339,13 +385,12 @@ namespace oceanbase
         check_thread_.start();
         TBSYS_LOG(INFO, "slave check_thread started");
 
-        while (ObRoleMgr::SWITCHING != role_mgr_.get_state())
+        while (ObRoleMgr::SWITCHING != role_mgr_.get_state() // lease is valid and vip is mine
+               && ObRoleMgr::INIT != role_mgr_.get_state() //  lease is invalid, should reregister to master
+                                                           // but now just let it exit.
+               && ObRoleMgr::STOP != role_mgr_.get_state() // stop normally
+               && ObRoleMgr::ERROR != role_mgr_.get_state())
         {
-          if (ObRoleMgr::STOP == role_mgr_.get_state()
-              || ObRoleMgr::ERROR == role_mgr_.get_state())
-          {
-            break;
-          }
           usleep(10 * 1000); // 10 ms
         }
 
@@ -373,8 +418,8 @@ namespace oceanbase
 
           //get last frozen mem table version from updateserver
           int64_t frozen_version = 1;
-          if (OB_SUCCESS == ups_get_last_frozen_memtable_version(root_server_.get_update_server_info(),
-                frozen_version))
+          if (OB_SUCCESS == rt_rpc_stub_.get_last_frozen_version(root_server_.get_update_server_info(),
+                                                                 network_timeout_, frozen_version))
           {
             root_server_.report_frozen_memtable(frozen_version, false);
           }
@@ -404,20 +449,47 @@ namespace oceanbase
 
       TBSYS_LOG(INFO, "[NOTICE] going to quit");
       stop();
+      TBSYS_LOG(INFO, "[NOTICE] server terminated");
       return err;
     }
 
-    int OBRootWorker::get_ups_frozen_memtable_version()
+    int OBRootWorker::get_obi_role_from_master()
     {
-      int64_t frozen_version = 0;
-      int ret = ups_get_last_frozen_memtable_version(root_server_.get_update_server_info(),frozen_version);
-      if (OB_SUCCESS == ret)
+      int ret = OB_SUCCESS;
+      ObiRole role;
+      const static int SLEEP_US_WHEN_INIT = 2000*1000; // 2s
+      while(true)
       {
-        root_server_.report_frozen_memtable(frozen_version, false);
-      }
+        ret = rt_rpc_stub_.get_obi_role(rt_master_, network_timeout_, role);
+        if (OB_SUCCESS != ret)
+        {
+          TBSYS_LOG(ERROR, "failed to get obi_role from the master, err=%d", ret);
+          break;
+        }
+        else if (ObiRole::INIT == role.get_role())
+        {
+          TBSYS_LOG(INFO, "we should wait when obi_role=INIT");
+          usleep(SLEEP_US_WHEN_INIT);
+        }
+        else
+        {
+          ret = root_server_.set_obi_role(role);
+          if (OB_SUCCESS != ret)
+          {
+            TBSYS_LOG(ERROR, "failed to set_obi_role, err=%d", ret);
+          }
+          break;
+        }
+        if (ObRoleMgr::STOP == role_mgr_.get_state())
+        {
+          TBSYS_LOG(INFO, "server stopped, break");
+          ret = OB_ERROR;
+          break;
+        }
+      } // end while
       return ret;
     }
-
+    
     void OBRootWorker::destroy()
     {
       role_mgr_.set_state(ObRoleMgr::STOP);
@@ -440,7 +512,9 @@ namespace oceanbase
         write_thread_queue_.stop();
         check_thread_.stop();
       }
+      TBSYS_LOG(INFO, "stop flag set");
       wait_for_queue();
+      root_server_.stop_threads();
     }
 
     void OBRootWorker::wait_for_queue()
@@ -448,9 +522,13 @@ namespace oceanbase
       if (ObRoleMgr::SLAVE == role_mgr_.get_role())
       {
         log_thread_queue_.wait();
+        TBSYS_LOG(INFO, "log thread stopped");
         fetch_thread_.wait();
+        TBSYS_LOG(INFO, "fetch thread stopped");
         log_replay_thread_.wait();
+        TBSYS_LOG(INFO, "replay thread stopped");
         check_thread_.wait();
+        TBSYS_LOG(INFO, "check thread stopped");
       }
       else
       {
@@ -477,7 +555,7 @@ namespace oceanbase
         switch(packet_code)
         {
           case OB_SEND_LOG:
-          case OB_GRANT_LEASE_REQUEST:
+          case OB_GRANT_LEASE_REQUEST: 
             if (ObRoleMgr::SLAVE == role_mgr_.get_role())
             {
               ps = log_thread_queue_.push(req, task_log_queue_size_, false);
@@ -505,7 +583,14 @@ namespace oceanbase
           case OB_SLAVE_REG:
           case OB_WAITING_JOB_DONE:
             //the packet will cause write to b+ tree
-            ps = write_thread_queue_.push(req, task_write_queue_size_, false);
+            if (ObRoleMgr::MASTER == role_mgr_.get_role())
+            {
+              ps = write_thread_queue_.push(req, task_write_queue_size_, false);
+            }
+            else
+            {
+              ps = false;
+            }
             break;
           case OB_FETCH_SCHEMA:
           case OB_FETCH_SCHEMA_VERSION:
@@ -518,26 +603,54 @@ namespace oceanbase
           case OB_UPDATE_SERVER_REPORT_FREEZE:
           case OB_GET_UPDATE_SERVER_INFO_FOR_MERGE:
           case OB_GET_MERGE_DELAY_INTERVAL:
-            ps = read_thread_queue_.push(req, task_read_queue_size_, false);
-            break;
-          case OB_PING_REQUEST:
+          case OB_GET_OBI_ROLE:
+          case OB_SET_OBI_ROLE:
+          case OB_CHANGE_LOG_LEVEL:
+          case OB_RS_ADMIN:
+          case OB_RS_STAT:
+          case OB_GET_OBI_CONFIG:
+          case OB_SET_OBI_CONFIG:
+          case OB_GET_UPS:
+          case OB_SET_UPS_CONFIG:
+          case OB_GET_CLIENT_CONFIG:
+          case OB_GET_CS_LIST:
+          case OB_GET_MS_LIST:
             if (ObRoleMgr::MASTER == role_mgr_.get_role())
             {
               ps = read_thread_queue_.push(req, task_read_queue_size_, false);
             }
             else
             {
-              ps = log_thread_queue_.push(req, task_log_queue_size_, false);
+              ps = false;
+            }
+            break;
+          case OB_PING_REQUEST: // response PING immediately
+            ps = true;
+            {
+              ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
+              ObDataBuffer thread_buffer(my_buffer->current(), my_buffer->remain());
+              int return_code = rt_ping(req->get_api_version(), *req->get_buffer(),
+                                        connection, req->getChannelId(), thread_buffer);
+              if (OB_SUCCESS != return_code)
+              {
+                TBSYS_LOG(WARN, "response ping error. return code is %d", return_code);
+              }
             }
             break;
           default:
-            ps = false; // so this unknow packet will be freed
-            TBSYS_LOG(WARN, "UNKNOW packet %d, ignore this", packet_code);
+            ps = false; // so this unknown packet will be freed
+            TBSYS_LOG(WARN, "UNKNOWN packet %d, ignore this", packet_code);
             break;
         }
         if (!ps)
         {
-          TBSYS_LOG(WARN, "pakcet %d can not be distribute to queue", packet_code);
+          if (OB_FETCH_STATS != packet_code)
+          {
+            TBSYS_LOG(ERROR, "packet %d can not be distribute to queue, role=%d rqueue_size=%ld wqueue_size=%ld", 
+                      packet_code, role_mgr_.get_role(), 
+                      read_thread_queue_.size(), 
+                      write_thread_queue_.size());
+          }
           rc = tbnet::IPacketHandler::KEEP_CHANNEL;
         }
       } 
@@ -554,7 +667,9 @@ namespace oceanbase
     {
       bool ret = true;
       int return_code = OB_SUCCESS;
-      
+      static __thread int64_t worker_counter = 0;
+      static volatile uint64_t total_counter = 0;
+
       ObPacket* ob_packet = reinterpret_cast<ObPacket*>(packet);
       int packet_code = ob_packet->get_packet_code();
       int version = ob_packet->get_api_version();
@@ -564,10 +679,15 @@ namespace oceanbase
       if (source_timeout > 0)
       {
         int64_t block_us = tbsys::CTimeUtil::getTime() - ob_packet->get_receive_ts();
-        if (block_us > source_timeout)
+        int64_t expected_process_us = expected_process_us_;
+        if (source_timeout <= expected_process_us_)
         {
-          TBSYS_LOG(WARN, "packet code=%d block for %ld(us) exceed time out %ld(us) ignore this packet",
-              packet_code, block_us, ob_packet->get_receive_ts());
+          expected_process_us = 0;
+        }
+        if (block_us + expected_process_us > source_timeout)
+        {
+          TBSYS_LOG(WARN, "packet timeout, pcode=%d timeout=%ld block_us=%ld expected_us=%ld receive_ts=%ld",
+                    packet_code, source_timeout, block_us, expected_process_us, ob_packet->get_receive_ts());
           return_code = OB_RESPONSE_TIME_OUT;
         }
       }
@@ -623,15 +743,15 @@ namespace oceanbase
               {
                 switch(packet_code)
                 {
-                  case OB_PING_REQUEST:
-                    return_code = rt_ping(version, *in_buf, conn, channel_id, thread_buff);
-                    break;
                   case OB_GRANT_LEASE_REQUEST:
                     return_code = rt_grant_lease(version, *in_buf, conn, channel_id, thread_buff);
                     break;
-                  default:
+                  case OB_SEND_LOG:
                     in_buf->get_limit() = in_buf->get_position() + ob_packet->get_data_length();
                     return_code = rt_slave_write_log(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  default:
+                    return_code = OB_ERROR;
                     break;
                 }
               }
@@ -661,10 +781,8 @@ namespace oceanbase
                   case OB_FETCH_STATS:
                     return_code = rt_fetch_stats(version, *in_buf, conn, channel_id, thread_buff);
                     break;
-                  case OB_PING_REQUEST:
-                    return_code = rt_ping(version, *in_buf, conn, channel_id, thread_buff);
-                    break;
                   case OB_GET_UPDATE_SERVER_INFO:
+                    TBSYS_LOG(INFO,"receive get ups quest");
                     return_code = rt_get_update_server_info(version, *in_buf, conn, channel_id, thread_buff);
                     break;
                   case OB_GET_UPDATE_SERVER_INFO_FOR_MERGE:
@@ -682,6 +800,42 @@ namespace oceanbase
                   case OB_UPDATE_SERVER_REPORT_FREEZE:
                     return_code = rt_update_server_report_freeze(version, *in_buf, conn, channel_id, thread_buff);
                     break;
+                  case OB_GET_OBI_ROLE:
+                    return_code = rt_get_obi_role(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_SET_OBI_ROLE:
+                    return_code = rt_set_obi_role(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_RS_ADMIN:
+                    return_code = rt_admin(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_RS_STAT:
+                    return_code = rt_stat(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_CHANGE_LOG_LEVEL:
+                    return_code = rt_change_log_level(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_GET_OBI_CONFIG:
+                    return_code = rt_get_obi_config(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_SET_OBI_CONFIG:
+                    return_code = rt_set_obi_config(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_GET_UPS:
+                    return_code = rt_get_ups(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_SET_UPS_CONFIG:
+                    return_code = rt_set_ups_config(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_GET_CLIENT_CONFIG:
+                    return_code = rt_get_client_config(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_GET_CS_LIST:
+                    return_code = rt_get_cs_list(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
+                  case OB_GET_MS_LIST:
+                    return_code = rt_get_ms_list(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
                   default:
                     TBSYS_LOG(ERROR, "unknow packet code %d in read queue", packet_code);
                     return_code = OB_ERROR;
@@ -692,6 +846,7 @@ namespace oceanbase
               {
                 TBSYS_LOG(ERROR, "call func error packet_code is %d return code is %d", packet_code, return_code);
               }
+              
             }
             else
             {
@@ -705,170 +860,19 @@ namespace oceanbase
               packet_code, tbsys::CNetUtil::addrToString(ob_packet->get_connection()->getPeerId()).c_str());
         }
       }
+
+      worker_counter++;
+      atomic_inc(&total_counter);
+      if (0 == worker_counter % 500)
+      {
+        int64_t now = tbsys::CTimeUtil::getTime();
+        int64_t receive_ts = ob_packet->get_receive_ts();
+        TBSYS_LOG(INFO, "worker report, tid=%d my_counter=%ld total_counter=%ld current_elapsed_us=%ld", 
+                  syscall(__NR_gettid), worker_counter, total_counter, now - receive_ts);
+      }
       return ret;//if return true packet will be deleted.
     }
 
-    int OBRootWorker::up_switch_schema(const common::ObServer& server, common::ObSchemaManagerV2* schema_manager)
-    {
-      int ret = OB_SUCCESS;
-
-      if (NULL == schema_manager)
-      {
-        ret = OB_INVALID_ARGUMENT;
-      }
-
-      if (OB_SUCCESS == ret)
-      {
-        if (TBSYS_LOGGER._level >= TBSYS_LOG_LEVEL_INFO)
-        {
-          char server_char[OB_IP_STR_BUFF];
-          server.to_string(server_char, OB_IP_STR_BUFF);
-          TBSYS_LOG(INFO, "up_switch_schema(%s)", server_char);
-        }
-      }
-
-      static const int MY_VERSION = 1;
-      if (OB_SUCCESS == ret)
-      {
-        ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
-        if (my_buffer != NULL)
-        {
-          my_buffer->reset();
-          ObDataBuffer thread_buff(my_buffer->current(), my_buffer->remain());
-          ret = schema_manager->serialize(thread_buff.get_data(), thread_buff.get_capacity(), thread_buff.get_position());
-          if (OB_SUCCESS != ret)
-          {
-            TBSYS_LOG(ERROR, "ObSchemaManager serialize error, ret=%d", ret);
-          }
-          else
-          {
-            ret = client_manager.send_request(server, OB_SWITCH_SCHEMA, MY_VERSION, network_timeout_, thread_buff);
-            if (OB_SUCCESS != ret)
-            {
-              TBSYS_LOG(ERROR, "ClientManager send_request error, ret=%d thread_buff.data=%p", ret, thread_buff.get_data());
-            }
-          }
-          ObDataBuffer out_buffer(thread_buff.get_data(), thread_buff.get_position());
-          if (ret == OB_SUCCESS) 
-          {
-            common::ObResultCode result_msg;
-            ret = result_msg.deserialize(out_buffer.get_data(), out_buffer.get_capacity(), out_buffer.get_position());
-            if (ret != OB_SUCCESS)
-            {
-              TBSYS_LOG(ERROR, "ObResultCode deserialize error, ret=%d buf.data=%p buf.cap=%ld buf.pos=%ld",
-                  ret, out_buffer.get_data(), out_buffer.get_capacity(), out_buffer.get_position());
-            }
-            else
-            {
-              ret = result_msg.result_code_;
-              if (ret != OB_SUCCESS) 
-              {
-                TBSYS_LOG(INFO, "rpc return error code is %d msg is %s", result_msg.result_code_, result_msg.message_.ptr());
-              }
-            }
-          }
-        }
-        else
-        {
-          TBSYS_LOG(ERROR, "can not get thread buffer");
-          ret = OB_ERROR;
-        }
-      }
-      return ret;
-    }
-
-    int OBRootWorker::up_freeze_mem(const common::ObServer& server, int64_t& frozen_mem_version)
-    {
-      if (TBSYS_LOGGER._level >= TBSYS_LOG_LEVEL_INFO)
-      {
-        char server_char[OB_IP_STR_BUFF];
-        server.to_string(server_char, OB_IP_STR_BUFF);
-        TBSYS_LOG(INFO, "up_freeze_mem(%s)", server_char);
-      }
-      static const int MY_VERSION = 1;
-      int ret = OB_SUCCESS;
-      ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
-      if (my_buffer != NULL)
-      {
-        my_buffer->reset();
-        ObDataBuffer thread_buff(my_buffer->current(), my_buffer->remain());
-        if (OB_SUCCESS == ret)
-        {
-          ret = client_manager.send_request(server, OB_FREEZE_MEM_TABLE, MY_VERSION, network_timeout_, thread_buff);
-        }
-        ObDataBuffer out_buffer(thread_buff.get_data(), thread_buff.get_position());
-        if (ret == OB_SUCCESS) 
-        {
-          common::ObResultCode result_msg;
-          ret = result_msg.deserialize(out_buffer.get_data(), out_buffer.get_capacity(), out_buffer.get_position());
-          if (ret == OB_SUCCESS)
-          {
-            ret = result_msg.result_code_;
-            if (ret != OB_SUCCESS) 
-            {
-              TBSYS_LOG(INFO, "rpc return error code is %d msg is %s", result_msg.result_code_, result_msg.message_.ptr());
-            }
-          }
-          if (ret == OB_SUCCESS)
-          {
-            ret = common::serialization::decode_vi64(out_buffer.get_data(), out_buffer.get_capacity(), 
-                out_buffer.get_position(), &frozen_mem_version);
-            if (ret != OB_SUCCESS) 
-            {
-              TBSYS_LOG(INFO, "deserialize frozen_mem_version error error_code is %d", ret);
-            }
-          }
-        }
-      }
-      else
-      {
-        TBSYS_LOG(ERROR, "can not get thread buffer");
-        ret = OB_ERROR;
-      }
-      return ret;
-    }
-    bool OBRootWorker::is_master() const
-    {
-      return root_server_.is_master();
-    }
-    void OBRootWorker::dump_root_table() const
-    {
-      root_server_.dump_root_table();
-      return;
-    }
-    void OBRootWorker::dump_available_server() const
-    {
-      root_server_.print_alive_server();
-      return;
-    }
-    void OBRootWorker::drop_current_merge () 
-    {
-      root_server_.drop_current_build();
-      return;
-    }
-    void OBRootWorker::use_new_schema()
-    {
-      root_server_.use_new_schema();
-      return;
-    }
-    void OBRootWorker::reload_config()
-    {
-      root_server_.reload_config();
-      return;
-    }
-    //bool OBRootWorker::start_report()
-    //{
-    //  //int64_t now = tbsys::CTimeUtil::getTime();
-    //  bool ret = false;
-    //  int retry = 0;
-    //  while ((ret = root_server_.start_report(true)) != true) 
-    //  {
-    //    retry++;
-    //    if (retry > 5) break;
-    //    usleep(500);
-    //  }
-    //  return ret;
-    //}
     bool OBRootWorker::start_merge()
     {
       //int64_t now = tbsys::CTimeUtil::getTime();
@@ -930,6 +934,7 @@ namespace oceanbase
       }
       if (OB_SUCCESS == ret)
       {
+        TBSYS_LOG(INFO,"response for get ups request");
         send_response(OB_GET_UPDATE_SERVER_INFO_RES, MY_VERSION, out_buff, conn, channel_id);
       }
       return ret;
@@ -1006,7 +1011,7 @@ namespace oceanbase
       }
       if (OB_SUCCESS == ret && OB_SUCCESS == result_msg.result_code_) 
       {
-        result_msg.result_code_ = scan(scan_param_in, scanner_out);
+        result_msg.result_code_ = root_server_.find_root_table_range(scan_param_in, scanner_out);
       }
 
       if (OB_SUCCESS == ret)
@@ -1070,7 +1075,7 @@ namespace oceanbase
       }
       if (OB_SUCCESS == ret && OB_SUCCESS == result_msg.result_code_) 
       {
-        result_msg.result_code_ = get(get_param_in, scanner_out);
+        result_msg.result_code_ = root_server_.find_root_table_key(get_param_in, scanner_out);
       }
 
       if (OB_SUCCESS == ret)
@@ -1096,46 +1101,24 @@ namespace oceanbase
       if (OB_SUCCESS == ret) 
       {
         stat_manager_.inc(ObRootStatManager::ROOT_TABLE_ID, ObRootStatManager::INDEX_SUCCESS_GET_COUNT);
+        ObStat* stat = NULL;
+        if (OB_SUCCESS == stat_manager_.get_stat(ObRootStatManager::ROOT_TABLE_ID, stat))
+        {
+          if (NULL != stat)
+          {
+            int64_t get_count = stat->get_value(ObRootStatManager::INDEX_SUCCESS_GET_COUNT);
+            if (0 == get_count % 500)
+            {
+              TBSYS_LOG(INFO, "get request stat, count=%ld from=%s", get_count, inet_ntoa_r(conn->getPeerId()));
+            }
+          }
+        }
       }
       else
       {
         stat_manager_.inc(ObRootStatManager::ROOT_TABLE_ID, ObRootStatManager::INDEX_FAIL_GET_COUNT);
       }
       return ret;
-    }
-    int OBRootWorker::get(const common::ObGetParam& get_param, common::ObScanner& scanner)
-    {
-      int ret = OB_SUCCESS;
-      const ObCellInfo* cell = get_param[0];
-      if (cell == NULL)
-      {
-        ret = OB_INVALID_ARGUMENT;
-      }
-      else
-      {
-        int8_t rt_type = 0;
-        //cell->value_.get_extend_field(rt_type); 
-        UNUSED(rt_type); // for now we ignore this; OP_RT_TABLE_TYPE or OP_RT_TABLE_INDEX_TYPE
-        if (cell->table_id_ != 0 && cell->table_id_ != OB_INVALID_ID)
-        {
-          ret = root_server_.find_root_table_key(cell->table_id_, cell->row_key_, scanner);
-        }
-        else
-        {
-          ret = root_server_.find_root_table_key(cell->table_name_, cell->row_key_, scanner);
-        }
-      }
-      return ret;
-
-    }
-    int OBRootWorker::scan(const common::ObScanParam& scan_param, common::ObScanner& scanner)
-    {
-      int ret = OB_SUCCESS;
-      int8_t rt_type;  // we have no this infomation;
-      UNUSED(rt_type); // for now we ignore this;
-      ret = root_server_.find_root_table_range(scan_param.get_table_name(), *(scan_param.get_range()), scanner);
-      return ret;
-
     }
 
     int OBRootWorker::rt_fetch_schema(const int32_t version, common::ObDataBuffer& in_buff, 
@@ -1253,61 +1236,7 @@ namespace oceanbase
       }
       return ret;
     }
-    int OBRootWorker::cs_start_merge(const ObServer& server, const int64_t frozen_mem_version, const int32_t init_flag)
-    {
-      if (TBSYS_LOGGER._level >= TBSYS_LOG_LEVEL_INFO)
-      {
-        char server_char[OB_IP_STR_BUFF];
-        server.to_string(server_char, OB_IP_STR_BUFF);
-        TBSYS_LOG(INFO, "cs_start_merge (%s, %ld)", server_char, frozen_mem_version);
-      }
-      static const int MY_VERSION = 1;
-      int ret = OB_SUCCESS;
-      ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
-      if (my_buffer != NULL)
-      {
-        my_buffer->reset();
-        ObDataBuffer thread_buff(my_buffer->current(), my_buffer->remain());
-        ret = common::serialization::encode_vi64(thread_buff.get_data(), 
-            thread_buff.get_capacity(), thread_buff.get_position(), frozen_mem_version);
-        if (OB_SUCCESS == ret)
-        {
-          ret = common::serialization::encode_vi32(thread_buff.get_data(), 
-              thread_buff.get_capacity(), thread_buff.get_position(), init_flag);
-        }
 
-        common::ObServer tmp_server = server;
-#ifdef PRESS_TEST
-        tmp_server.reset_ipv4_10();
-#endif
-        if (OB_SUCCESS == ret)
-        {
-          ret = client_manager.send_request(tmp_server, OB_START_MERGE, MY_VERSION, network_timeout_, thread_buff);
-        }
-        ObDataBuffer out_buffer(thread_buff.get_data(), thread_buff.get_position());
-        if (ret == OB_SUCCESS) 
-        {
-          common::ObResultCode result_msg;
-          ret = result_msg.deserialize(out_buffer.get_data(), out_buffer.get_capacity(), out_buffer.get_position());
-          if (ret == OB_SUCCESS)
-          {
-            ret = result_msg.result_code_;
-            if (ret != OB_SUCCESS) 
-            {
-              TBSYS_LOG(INFO, "rpc return error code is %d msg is %s", result_msg.result_code_, result_msg.message_.ptr());
-            }
-          }
-        }
-      }
-      else
-      {
-        TBSYS_LOG(ERROR, "can not get thread buffer");
-        ret = OB_ERROR;
-      }
-      return ret;
-    }
-
-    //ObResultCode rt_report_tablets(const ObServer& server, const ObTabletReportInfoList& tablets, uint64_t time_stamp);
     int OBRootWorker::rt_report_tablets(const int32_t version, common::ObDataBuffer& in_buff, 
         tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
     {
@@ -1741,259 +1670,6 @@ namespace oceanbase
       return ret;
 
     }
-    int OBRootWorker::unload_old_table(const ObServer& server, const int64_t time_stamp)
-    {
-      if (TBSYS_LOGGER._level >= TBSYS_LOG_LEVEL_INFO)
-      {
-        char server_char[OB_IP_STR_BUFF];
-        server.to_string(server_char, OB_IP_STR_BUFF);
-        TBSYS_LOG(INFO, "unload_old_tablet (%s, %ld)", server_char, time_stamp);
-      }
-      static const int MY_VERSION = 1;
-      int ret = OB_SUCCESS;
-      ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
-      if (my_buffer != NULL)
-      {
-        my_buffer->reset();
-        ObDataBuffer thread_buff(my_buffer->current(), my_buffer->remain());
-        ret = common::serialization::encode_vi64(thread_buff.get_data(), 
-            thread_buff.get_capacity(), thread_buff.get_position(), time_stamp);
-        common::ObServer tmp_server = server;
-#ifdef PRESS_TEST
-        tmp_server.reset_ipv4_10();
-#endif
-        if (OB_SUCCESS == ret)
-        {
-          ret = client_manager.send_request(tmp_server, OB_DROP_OLD_TABLETS, MY_VERSION, network_timeout_, thread_buff);
-        }
-        ObDataBuffer out_buffer(thread_buff.get_data(), thread_buff.get_position());
-        if (ret == OB_SUCCESS) 
-        {
-          common::ObResultCode result_msg;
-          ret = result_msg.deserialize(out_buffer.get_data(), out_buffer.get_capacity(), out_buffer.get_position());
-          if (ret == OB_SUCCESS)
-          {
-            ret = result_msg.result_code_;
-            if (ret != OB_SUCCESS) 
-            {
-              TBSYS_LOG(INFO, "rpc return error code is %d msg is %s", result_msg.result_code_, result_msg.message_.ptr());
-            }
-          }
-        }
-      }
-      else
-      {
-        TBSYS_LOG(ERROR, "can not get thread buffer");
-        ret = OB_ERROR;
-      }
-      return ret;
-    }
-    int OBRootWorker::hb_to_cs(const common::ObServer& server, const int64_t lease_time,
-                               const int64_t frozen_mem_version)
-    {
-      static const int MY_VERSION = 2;
-      int ret = OB_SUCCESS;
-      ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
-      if (my_buffer != NULL)
-      {
-        my_buffer->reset();
-        ObDataBuffer thread_buff(my_buffer->current(), my_buffer->remain());
-        ret = common::serialization::encode_vi64(thread_buff.get_data(), 
-            thread_buff.get_capacity(), thread_buff.get_position(), lease_time);
-
-        //TODO backward compatiblity
-        if (OB_SUCCESS == ret)
-        {
-          ret = common::serialization::encode_vi64(thread_buff.get_data(),
-              thread_buff.get_capacity(), thread_buff.get_position(), frozen_mem_version);
-        }
-
-        if (OB_SUCCESS == ret)
-        {
-          common::ObServer tmp_server = server;
-#ifdef PRESS_TEST
-          tmp_server.reset_ipv4_10();
-#endif
-          client_manager.post_request(tmp_server, OB_REQUIRE_HEARTBEAT, MY_VERSION, thread_buff);
-        }
-      }
-      else
-      {
-        TBSYS_LOG(ERROR, "can not get thread buffer");
-        ret = OB_ERROR;
-      }
-      return ret;
-    }
-
-    int OBRootWorker::hb_to_ms(const common::ObServer& server, const int64_t lease_time,
-                               const int64_t schema_version)
-    {
-      static const int MY_VERSION = 1;
-      int ret = OB_SUCCESS;
-      ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
-      if (NULL == my_buffer )
-      {
-        TBSYS_LOG(ERROR, "can not get thread buffer");
-        ret = OB_ERROR;
-      }
-      else
-      {
-        my_buffer->reset();
-        ObDataBuffer thread_buff(my_buffer->current(), my_buffer->remain());
-        ret = common::serialization::encode_vi64(thread_buff.get_data(), 
-            thread_buff.get_capacity(), thread_buff.get_position(), lease_time);
-
-        if (OB_SUCCESS == ret)
-        {
-          ret = common::serialization::encode_vi64(thread_buff.get_data(),
-              thread_buff.get_capacity(), thread_buff.get_position(), schema_version);
-        }
-
-        if (OB_SUCCESS == ret)
-        {
-          client_manager.post_request(server, OB_REQUIRE_HEARTBEAT, MY_VERSION, thread_buff);
-        }
-      }
-      return ret;
-    }
-
-    int OBRootWorker::cs_migrate(const common::ObRange& range, 
-        const common::ObServer& src_server, const common::ObServer& dest_server, bool keep_src)
-    {
-      static const int MY_VERSION = 1;
-      int ret = OB_SUCCESS;
-      ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
-      if (my_buffer != NULL)
-      {
-        my_buffer->reset();
-        ObDataBuffer thread_buff(my_buffer->current(), my_buffer->remain());
-        ret = range.serialize(thread_buff.get_data(), 
-            thread_buff.get_capacity(), thread_buff.get_position());
-
-        if (OB_SUCCESS == ret)
-        {
-          ret = dest_server.serialize(thread_buff.get_data(), 
-              thread_buff.get_capacity(), thread_buff.get_position());
-        }
-        if (OB_SUCCESS == ret)
-        {
-          ret = common::serialization::encode_bool(thread_buff.get_data(), 
-              thread_buff.get_capacity(), thread_buff.get_position(), keep_src);
-        }
-        if (OB_SUCCESS == ret)
-        {
-          ret = client_manager.send_request(src_server, OB_CS_MIGRATE, MY_VERSION, network_timeout_, thread_buff);
-        }
-        ObDataBuffer out_buffer(thread_buff.get_data(), thread_buff.get_position());
-        if (ret == OB_SUCCESS) 
-        {
-          common::ObResultCode result_msg;
-          ret = result_msg.deserialize(out_buffer.get_data(), out_buffer.get_capacity(), out_buffer.get_position());
-          if (ret == OB_SUCCESS)
-          {
-            ret = result_msg.result_code_;
-            if (ret != OB_SUCCESS) 
-            {
-              TBSYS_LOG(INFO, "rpc return error code is %d msg is %s", result_msg.result_code_, result_msg.message_.ptr());
-            }
-          }
-        }
-      }
-      else
-      {
-        TBSYS_LOG(ERROR, "can not get thread buffer");
-        ret = OB_ERROR;
-      }
-      return ret;
-
-    }
-    int OBRootWorker::cs_create_tablet(const common::ObServer& server, const common::ObRange& range, const int64_t mem_version)
-    {
-      static const int MY_VERSION = 1;
-      int ret = OB_SUCCESS;
-      ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
-      if (my_buffer != NULL)
-      {
-        my_buffer->reset();
-        ObDataBuffer thread_buff(my_buffer->current(), my_buffer->remain());
-        ret = range.serialize(thread_buff.get_data(), 
-            thread_buff.get_capacity(), thread_buff.get_position());
-        if (OB_SUCCESS == ret)
-        {
-          ret = common::serialization::encode_vi64(thread_buff.get_data(), 
-              thread_buff.get_capacity(), thread_buff.get_position(), mem_version);
-        }
-
-        if (OB_SUCCESS == ret)
-        {
-          ret = client_manager.send_request(server, OB_CS_CREATE_TABLE, MY_VERSION, network_timeout_, thread_buff);
-        }
-        ObDataBuffer out_buffer(thread_buff.get_data(), thread_buff.get_position());
-        if (ret == OB_SUCCESS) 
-        {
-          common::ObResultCode result_msg;
-          ret = result_msg.deserialize(out_buffer.get_data(), out_buffer.get_capacity(), out_buffer.get_position());
-          if (ret == OB_SUCCESS)
-          {
-            ret = result_msg.result_code_;
-            if (ret != OB_SUCCESS) 
-            {
-              TBSYS_LOG(INFO, "rpc return error code is %d msg is %s", result_msg.result_code_, result_msg.message_.ptr());
-            }
-          }
-        }
-      }
-      else
-      {
-        TBSYS_LOG(ERROR, "can not get thread buffer");
-        ret = OB_ERROR;
-      }
-      return ret;
-    }
-    int OBRootWorker::ups_get_last_frozen_memtable_version(const common::ObServer& server, int64_t &last_version)
-    {
-      static const int MY_VERSION = 1;
-      int ret = OB_SUCCESS;
-      ThreadSpecificBuffer::Buffer* my_buffer = my_thread_buffer.get_buffer();
-      if (my_buffer != NULL)
-      {
-        my_buffer->reset();
-        ObDataBuffer thread_buff(my_buffer->current(), my_buffer->remain());
-
-        if (OB_SUCCESS == ret)
-        {
-          ret = client_manager.send_request(server, OB_UPS_GET_LAST_FROZEN_VERSION, MY_VERSION, network_timeout_, thread_buff);
-        }
-        ObDataBuffer out_buffer(thread_buff.get_data(), thread_buff.get_position());
-        if (ret == OB_SUCCESS) 
-        {
-          common::ObResultCode result_msg;
-          ret = result_msg.deserialize(out_buffer.get_data(), out_buffer.get_capacity(), out_buffer.get_position());
-          if (ret == OB_SUCCESS)
-          {
-            ret = result_msg.result_code_;
-            if (ret != OB_SUCCESS) 
-            {
-              TBSYS_LOG(INFO, "rpc return error code is %d msg is %s", result_msg.result_code_, result_msg.message_.ptr());
-            }
-          }
-          if (OB_SUCCESS == ret)
-          {
-            ret = serialization::decode_vi64(out_buffer.get_data(), out_buffer.get_capacity(), out_buffer.get_position(), &last_version);
-            if (ret != OB_SUCCESS)
-            {
-              TBSYS_LOG(ERROR, "deserialize last_version failed:ret [%d]", ret);
-            }
-          }
-        }
-      }
-      else
-      {
-        TBSYS_LOG(ERROR, "can not get thread buffer");
-        ret = OB_ERROR;
-      }
-      return ret;
-    }
 
     ObRootLogManager* OBRootWorker::get_log_manager()
     {
@@ -2245,13 +1921,12 @@ namespace oceanbase
     int OBRootWorker::slave_register_(common::ObFetchParam& fetch_param)
     {
       int err = OB_SUCCESS;
-      int64_t num_times = TBSYS_CONFIG.getInt(STR_ROOT_SECTION, STR_REGISTER_TIMES, DEFAULT_REGISTER_TIMES);
       int64_t timeout = TBSYS_CONFIG.getInt(STR_ROOT_SECTION, STR_REGISTER_TIMEOUT_US, DEFAULT_REGISTER_TIMEOUT_US);
       const ObServer& self_addr = self_addr_;
 
       err = OB_RESPONSE_TIME_OUT;
       for (int64_t i = 0; ObRoleMgr::STOP != role_mgr_.get_state()
-          && OB_RESPONSE_TIME_OUT == err && i < num_times; ++i)
+             && OB_RESPONSE_TIME_OUT == err; i++)
       {
         // slave register
         err = rt_rpc_stub_.slave_register(rt_master_, self_addr_, fetch_param, timeout);
@@ -2265,12 +1940,6 @@ namespace oceanbase
       {
         TBSYS_LOG(INFO, "the slave is stopped manually.");
         err = OB_ERROR;
-      }
-      else if (OB_RESPONSE_TIME_OUT == err)
-      {
-        TBSYS_LOG(WARN, "slave register timeout, num_times=%ld, timeout=%ldus",
-            num_times, timeout);
-        err = OB_RESPONSE_TIME_OUT;
       }
       else if (OB_SUCCESS != err)
       {
@@ -2527,7 +2196,487 @@ namespace oceanbase
 
       return ret;
     }
+
+
+int OBRootWorker::rt_get_obi_role(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  UNUSED(version);
+  UNUSED(in_buff);
+  static const int MY_VERSION = 1;
+  common::ObResultCode result_msg;
+  result_msg.result_code_ = OB_SUCCESS;
+  int ret = OB_SUCCESS;
+  ObiRole role = root_server_.get_obi_role();
+
+  stat_manager_.inc(ObRootStatManager::ROOT_TABLE_ID, ObRootStatManager::INDEX_GET_OBI_ROLE_COUNT);
+  ObStat* stat = NULL;
+  if (OB_SUCCESS == stat_manager_.get_stat(ObRootStatManager::ROOT_TABLE_ID, stat))
+  {
+    if (NULL != stat)
+    {
+      int64_t count = stat->get_value(ObRootStatManager::INDEX_GET_OBI_ROLE_COUNT);
+      if (0 == count % 500)
+      {
+        TBSYS_LOG(INFO, "get obi role, count=%ld role=%s from=%s", count, role.get_role_str(), inet_ntoa_r(conn->getPeerId()));
+      }
+    }
   }
+  if (OB_SUCCESS != (ret = result_msg.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }
+  else if (OB_SUCCESS != (ret = role.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }
+  else
+  {
+    ret = send_response(OB_GET_OBI_ROLE_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+  }
+  return ret;
 }
 
+int OBRootWorker::rt_set_obi_role(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  static const int MY_VERSION = 1;
+  UNUSED(version);
+  common::ObResultCode result_msg;
+  result_msg.result_code_ = OB_SUCCESS;
+  ObiRole role;
+  if (OB_SUCCESS != (ret = role.deserialize(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "deserialize error, err=%d", ret);
+  }
+  else
+  {
+    ret = root_server_.set_obi_role(role);
+  }
+  result_msg.result_code_ = ret;
+  // send response
+  if (OB_SUCCESS != (ret = result_msg.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else
+  {
+    ret = send_response(OB_SET_OBI_ROLE_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+  }
+  return ret;
+}
+
+int OBRootWorker::rt_admin(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  static const int MY_VERSION = 1;
+  UNUSED(version);
+  common::ObResultCode result;
+  result.result_code_ = OB_SUCCESS;
+  int32_t admin_cmd = -1;
+  if (OB_SUCCESS != (ret = serialization::decode_vi32(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position(), &admin_cmd)))
+  {
+    TBSYS_LOG(WARN, "deserialize error, err=%d", ret);
+  }
+  else
+  {
+    result.result_code_ = do_admin(admin_cmd);
+    TBSYS_LOG(INFO, "admin cmd=%d, err=%d", admin_cmd, result.result_code_);
+    if (OB_SUCCESS != (ret = result.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+    {
+      TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+    }    
+    else
+    {
+      ret = send_response(OB_RS_ADMIN_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+    }
+  }
+  return ret;
+}
+
+int OBRootWorker::do_admin(int admin_cmd)
+{
+  int ret = OB_SUCCESS;
+  switch(admin_cmd)
+  {
+    case OB_RS_ADMIN_CHECKPOINT:
+      if (root_server_.is_master())
+      {
+        ret = log_manager_.do_check_point();
+        TBSYS_LOG(INFO, "do checkpoint, ret=%d", ret);
+      }
+      else
+      {
+        TBSYS_LOG(WARN, "I'm not the master");
+      }
+      break;
+    case OB_RS_ADMIN_RELOAD_CONFIG:
+      if (!root_server_.reload_config(true))
+      {
+        ret = OB_ERROR;
+      }
+      break;
+    case OB_RS_ADMIN_SWITCH_SCHEMA:
+      root_server_.use_new_schema();
+      break;
+    case OB_RS_ADMIN_DUMP_ROOT_TABLE:
+      root_server_.dump_root_table();
+      break;
+    case OB_RS_ADMIN_DUMP_UNUSUAL_TABLETS:
+      root_server_.dump_unusual_tablets();
+      break;
+    case OB_RS_ADMIN_DUMP_SERVER_INFO:
+      root_server_.print_alive_server();
+      break;
+    case OB_RS_ADMIN_DUMP_MIGRATE_INFO:
+      root_server_.dump_migrate_info();
+      break;
+    case OB_RS_ADMIN_INC_LOG_LEVEL:
+      TBSYS_LOGGER._level++;
+      break;
+    case OB_RS_ADMIN_DEC_LOG_LEVEL:
+      TBSYS_LOGGER._level--;
+      break;
+    default:
+      TBSYS_LOG(WARN, "unknown admin command, cmd=%d\n", admin_cmd);
+      ret = OB_ENTRY_NOT_EXIST;
+      break;
+  }
+  return ret;
+}
+
+int OBRootWorker::rt_change_log_level(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  static const int MY_VERSION = 1;
+  UNUSED(version);
+  common::ObResultCode result;
+  result.result_code_ = OB_SUCCESS;
+  int32_t log_level = -1;
+  if (OB_SUCCESS != (ret = serialization::decode_vi32(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position(), &log_level)))
+  {
+    TBSYS_LOG(WARN, "deserialize error, err=%d", ret);
+  }
+  else
+  {
+    if (TBSYS_LOG_LEVEL_ERROR <= log_level
+        && TBSYS_LOG_LEVEL_DEBUG >= log_level)
+    {
+      TBSYS_LOGGER._level = log_level;
+      TBSYS_LOG(INFO, "change log level, level=%d", log_level);
+    }
+    else
+    {
+      TBSYS_LOG(WARN, "invalid log level, level=%d", log_level);
+      result.result_code_ = OB_INVALID_ARGUMENT;
+    }
+    if (OB_SUCCESS != (ret = result.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+    {
+      TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+    }    
+    else
+    {
+      ret = send_response(OB_RS_ADMIN_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+    }
+  }
+  return ret;
+}
+
+int OBRootWorker::rt_stat(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  static const int MY_VERSION = 1;
+  UNUSED(version);
+  common::ObResultCode result;
+  result.result_code_ = OB_SUCCESS;
+  int32_t stat_key = -1;
+  if (OB_SUCCESS != (ret = serialization::decode_vi32(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position(), &stat_key)))
+  {
+    TBSYS_LOG(WARN, "deserialize error, err=%d", ret);
+  }
+  else
+  {
+    result.message_.assign_ptr("hello world", sizeof("hello world"));
+    if (OB_SUCCESS != (ret = result.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+    {
+      TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+    }    
+    else
+    {
+      TBSYS_LOG(DEBUG, "get stat, stat_key=%d", stat_key);
+      do_stat(stat_key, out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position());
+      ret = send_response(OB_RS_ADMIN_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+    }
+  }
+  return ret;
+}
+
+using oceanbase::common::databuff_printf;
+
+int OBRootWorker::do_stat(int stat_key, char *buf, const int64_t buf_len, int64_t& pos)
+{
+  int ret = OB_SUCCESS;
+  TBSYS_LOG(DEBUG, "do_stat start, stat_key=%d buf=%p buf_len=%ld pos=%ld", 
+            stat_key, buf, buf_len, pos);
+  switch(stat_key)
+  {
+  case OB_RS_STAT_RS_SLAVE_NUM:
+    databuff_printf(buf, buf_len, pos, "slave_num: %d", slave_mgr_.get_num());
+    ret = OB_SUCCESS;
+    break;
+  default:
+    ret = root_server_.do_stat(stat_key, buf, buf_len, pos);
+    break;
+  }
+  // skip the trailing '\0'
+  pos++;
+  TBSYS_LOG(DEBUG, "do_stat finish, stat_key=%d buf=%p buf_len=%ld pos=%ld", 
+            stat_key, buf, buf_len, pos);
+  return ret;
+}
+
+int OBRootWorker::rt_get_obi_config(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  UNUSED(version);
+  UNUSED(in_buff);
+  static const int MY_VERSION = 1;
+  common::ObResultCode result_msg;
+  result_msg.result_code_ = OB_SUCCESS;
+  int ret = OB_SUCCESS;
+  ObiConfig conf;
+  result_msg.result_code_ = root_server_.get_obi_config(conf);
+
+  if (OB_SUCCESS != (ret = result_msg.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }
+  else if (OB_SUCCESS == result_msg.result_code_
+           && OB_SUCCESS != (ret = conf.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }
+  else
+  {
+    ret = send_response(OB_GET_OBI_CONFIG_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+  }
+  return ret;
+}
+
+int OBRootWorker::rt_set_obi_config(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  static const int OLD_VERSION = 1;
+  static const int MY_VERSION = 2;
+  UNUSED(version);
+  common::ObResultCode res;
+  res.result_code_ = OB_SUCCESS;
+  ObiConfig conf;
+  ObServer rs_addr;
+  if (OLD_VERSION == version)
+  {
+    if (OB_SUCCESS != (ret = conf.deserialize(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position())))
+    {
+      TBSYS_LOG(WARN, "deserialize error, err=%d", ret);
+    }
+    else
+    {
+      ret = root_server_.set_obi_config(conf);
+    }
+  }
+  else if (MY_VERSION == version)
+  {
+    if (OB_SUCCESS != (ret = conf.deserialize(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position())))
+    {
+      TBSYS_LOG(WARN, "deserialize error, err=%d", ret);
+    }
+    else if (OB_SUCCESS != (ret = rs_addr.deserialize(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position())))
+    {
+      TBSYS_LOG(WARN, "deserialize error, err=%d", ret);
+    }
+    else
+    {
+      if (0 == rs_addr.get_port())
+      {
+        ret = root_server_.set_obi_config(conf);
+      }
+      else
+      {
+        ret = root_server_.set_obi_config(rs_addr, conf);
+      }
+    }
+  }
+  else
+  {
+    TBSYS_LOG(ERROR, "invalid request version=%d", version);
+    ret = OB_ERROR_FUNC_VERSION;
+  }
+  res.result_code_ = ret;
+
+  // send response
+  if (OB_SUCCESS != (ret = res.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else
+  {
+    TBSYS_LOG(INFO, "set obi config, read_percentage=%d ret=%d", conf.get_read_percentage(), res.result_code_);
+    ret = send_response(OB_SET_OBI_CONFIG_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+  }
+  return ret;
+}
+
+int OBRootWorker::rt_get_ups(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(in_buff);
+  static const int MY_VERSION = 1;
+  if (MY_VERSION != version)
+  {
+    TBSYS_LOG(WARN, "invalid reqeust version, version=%d", version);
+    ret = OB_ERROR_FUNC_VERSION;
+  }
+  common::ObResultCode res;
+  res.result_code_ = ret;
+  if (OB_SUCCESS != (ret = res.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else if (OB_SUCCESS == res.result_code_ && OB_SUCCESS != (ret = root_server_.get_ups_list().serialize(
+                                                              out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else
+  {
+    ret = send_response(OB_GET_UPS_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+  }
+  return ret;
+}
+
+int OBRootWorker::rt_set_ups_config(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(in_buff);
+  static const int MY_VERSION = 1;
+  common::ObServer ups_addr;
+  int32_t ms_read_percentage = -1;
+  int32_t cs_read_percentage = -1;
+  if (MY_VERSION != version)
+  {
+    TBSYS_LOG(WARN, "invalid reqeust version, version=%d", version);
+    ret = OB_ERROR_FUNC_VERSION;
+  }
+  else if (OB_SUCCESS != (ret = ups_addr.deserialize(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position())))
+  {
+    printf("failed to serialize ups_addr, err=%d\n", ret);
+  }
+  else if (OB_SUCCESS != (ret = serialization::decode_vi32(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position(), &ms_read_percentage)))
+  {
+    printf("failed to serialize read_percentage, err=%d\n", ret);
+  }
+  else if (OB_SUCCESS != (ret = serialization::decode_vi32(in_buff.get_data(), in_buff.get_capacity(), in_buff.get_position(), &cs_read_percentage)))
+  {
+    printf("failed to serialize read_percentage, err=%d\n", ret);
+  }
+  else
+  {
+    common::ObResultCode res;
+    res.result_code_ = root_server_.set_ups_config(ups_addr, ms_read_percentage, cs_read_percentage);
+    if (OB_SUCCESS != (ret = res.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+    {
+      TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+    }    
+    else
+    {
+      ret = send_response(OB_SET_UPS_CONFIG_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+    }
+  }
+  return ret;
+}
+
+int OBRootWorker::rt_get_client_config(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(in_buff);
+  static const int MY_VERSION = 1;
+  if (MY_VERSION != version)
+  {
+    TBSYS_LOG(WARN, "invalid reqeust version, version=%d", version);
+    ret = OB_ERROR_FUNC_VERSION;
+  }
+  common::ObResultCode res;
+  res.result_code_ = ret;
+  if (OB_SUCCESS != (ret = res.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else if (OB_SUCCESS == res.result_code_ && OB_SUCCESS != (ret = root_server_.get_client_config().serialize(
+                                                              out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else
+  {
+    ret = send_response(OB_GET_CLIENT_CONFIG_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+  }
+  return ret;
+}
+
+int OBRootWorker::rt_get_cs_list(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(in_buff);
+  static const int MY_VERSION = 1;
+  if (MY_VERSION != version)
+  {
+    TBSYS_LOG(WARN, "invalid reqeust version, version=%d", version);
+    ret = OB_ERROR_FUNC_VERSION;
+  }
+  common::ObResultCode res;
+  res.result_code_ = ret;
+  if (OB_SUCCESS != (ret = res.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else if (OB_SUCCESS == res.result_code_ && OB_SUCCESS != (ret = root_server_.serialize_cs_list(
+                                                              out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else
+  {
+    ret = send_response(OB_GET_CS_LIST_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+  }
+  return ret;
+}
+
+int OBRootWorker::rt_get_ms_list(const int32_t version, common::ObDataBuffer& in_buff, tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(in_buff);
+  static const int MY_VERSION = 1;
+  if (MY_VERSION != version)
+  {
+    TBSYS_LOG(WARN, "invalid reqeust version, version=%d", version);
+    ret = OB_ERROR_FUNC_VERSION;
+  }
+  common::ObResultCode res;
+  res.result_code_ = ret;
+  if (OB_SUCCESS != (ret = res.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else if (OB_SUCCESS == res.result_code_ && OB_SUCCESS != (ret = root_server_.serialize_ms_list(
+                                                              out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position())))
+  {
+    TBSYS_LOG(WARN, "serialize error, err=%d", ret);
+  }    
+  else
+  {
+    ret = send_response(OB_GET_MS_LIST_RESPONSE, MY_VERSION, out_buff, conn, channel_id);
+  }
+  return ret;
+}
+
+}
+}
 

@@ -61,6 +61,14 @@ namespace oceanbase
 
       int add_slave(const common::ObServer& server, uint64_t &new_log_file_id);
 
+      inline uint64_t get_max_log_id() {return max_log_id_;}
+      void get_cur_log_point(int64_t& log_file_id, int64_t& log_seq_id, int64_t& log_offset)
+      {
+        log_file_id = get_cur_log_file_id();
+        log_seq_id = get_cur_log_seq();
+        log_offset = get_cur_log_offset();
+      }
+
     private:
       int load_replay_point_();
 

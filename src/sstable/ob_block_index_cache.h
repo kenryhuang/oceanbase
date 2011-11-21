@@ -187,20 +187,6 @@ namespace oceanbase
                       ObBlockPositionInfos& pos_info);
 
       /**
-       * read and put block index into cache
-       * 
-       * @param block_index_info block index pos(offset, size) in 
-       *                         sstable, represent by sstable
-       *                         trailer.
-       * @param table_id table id of block to search
-       * 
-       * @return int if success, return OB_SUCCESS, else return 
-       *         OB_ERROR
-       */
-      int read_prepare_block_index(const ObBlockIndexPositionInfo& block_index_info, 
-                                   const uint64_t table_id);
-
-      /**
        * if using the default constructor, must call this function to 
        * set the file info cache 
        * 
@@ -229,6 +215,24 @@ namespace oceanbase
       int check_param(const ObBlockIndexPositionInfo& block_index_info,
                       const uint64_t table_id,
                       const uint64_t column_group_id);
+
+      /**
+       * read and put block index into cache, then return block index
+       * 
+       * @param block_index_info block index pos(offset, size) in 
+       *                         sstable, represent by sstable
+       *                         trailer.
+       * @param table_id table id of block to search 
+       * @param block_index block index to return 
+       * @param handle handle which holds the refference count
+       * 
+       * @return int if success, return OB_SUCCESS, else return 
+       *         OB_ERROR
+       */
+      int read_sstable_block_index(const ObBlockIndexPositionInfo& block_index_info,
+                                   ObSSTableBlockIndexV2& block_index, 
+                                   const uint64_t table_id,
+                                   Handle& handle);
 
       int load_block_index(const ObBlockIndexPositionInfo& block_index_info,
                            ObSSTableBlockIndexV2& block_index,

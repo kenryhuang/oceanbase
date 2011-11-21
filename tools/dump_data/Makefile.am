@@ -9,6 +9,10 @@ LDADD = $(top_builddir)/src/common/libcommon.a \
 
 AM_LDFLAGS = -lpthread -lc -lm -lrt -ldl -lnuma
 CXXFLAGS = -D__STDC_LIMIT_MACROS -g -Wall -DORDER_SERIALIZE
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_LIBRARIES = libdumpdata.a
 libdumpdata_a_SOURCES = task_info.cpp \
@@ -60,3 +64,5 @@ EXTRA_DIST = task_server.h \
              parse_file.h
 
 DIST_SUBDIRS=test
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

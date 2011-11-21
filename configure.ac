@@ -1,10 +1,10 @@
     AC_INIT([OceanBase],
-            [0.2],
+            [0.2.1],
             [qushan@taobao.com],
             [oceanbase])
     
     AC_PROG_LIBTOOL
-    AM_INIT_AUTOMAKE(oceanbase, 0.2) 
+    AM_INIT_AUTOMAKE(oceanbase, 0.2.1) 
     ac_default_prefix=${HOME}/oceanbase_bin# for convenience
     AC_PROG_CXX
     AC_LANG([C++])
@@ -45,7 +45,23 @@
 			  [ test_case=yes ]
 	   )
 
+    AC_ARG_WITH([coverage],
+           AS_HELP_STRING([--with-coverage],
+		          [with coverage (default is NO)]),
+	   		  [
+			    if test "$withval" = "yes"; then
+			    	coverage=yes
+			    fi
+			  ],
+			  [coverage=no]
+	   )
+
+	AC_ARG_VAR([RELEASEID], [release number when building in Taobao ABS])
+	AC_DEFINE_UNQUOTED([RELEASEID], "$RELEASEID")
+
     AM_CONDITIONAL([WITH_TEST_CASE], test x$test_case = xyes )
+
+    AM_CONDITIONAL([COVERAGE], test x$coverage = xyes )
 
     dnl see whether subversion is installed
     AC_PATH_PROG(svnversioncommand, svnversion)
@@ -65,11 +81,11 @@
     AC_CONFIG_FILES([\
                      Makefile \
                      tools/Makefile \
-		     tools/syschecker/Makefile \
-		     tools/syschecker/client/Makefile \
-		     tools/dump_data/Makefile \
-		     tools/dump_data/test/Makefile \
-         tools/obsql/Makefile \
+                     tools/syschecker/Makefile \
+                     tools/syschecker/client/Makefile \
+                     tools/dump_data/Makefile \
+                     tools/dump_data/test/Makefile \
+                     tools/obsql/Makefile \
                      src/Makefile \
                      src/common/Makefile \
                      src/common/compress/Makefile \
@@ -80,6 +96,7 @@
                      src/updateserver/Makefile \
                      src/mergeserver/Makefile \
                      src/sstable/Makefile \
+                     src/lsync/Makefile \
                      tests/Makefile \
                      tests/chunkserver/Makefile \
                      tests/common/Makefile \
@@ -90,6 +107,7 @@
                      tests/updateserver/mixed_test/Makefile \
                      tests/updateserver/stress_test/Makefile \
                      tests/mergeserver/Makefile \
-                     tests/sstable/Makefile
+                     tests/sstable/Makefile \
+                     tests/lsync/Makefile \
                      ])
     AC_OUTPUT

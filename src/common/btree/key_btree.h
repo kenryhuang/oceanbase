@@ -68,7 +68,7 @@ namespace oceanbase
        * @return  OK:     成功,  KEY_EXIST: key已经存在了
        */
       int32_t put(const K &key, const V &value, const bool overwrite = false);
-      int32_t put(const K &key, const V &value, V &old_value);
+      int32_t put(const K &key, const V &value, V &old_value, const bool key_overwrite = false, const bool value_overwrite = true);
 
       /**
        * 根据key, 从btree中删除掉
@@ -278,7 +278,7 @@ namespace oceanbase
     }
 
     template<class K, class V>
-    int32_t KeyBtree<K, V>::put(const K &key, const V &value, V &old_value)
+    int32_t KeyBtree<K, V>::put(const K &key, const V &value, V &old_value, const bool key_overwrite, const bool value_overwrite)
     {
       BtreeWriteHandle handle;
       int32_t ret = get_write_handle(handle);
@@ -287,9 +287,27 @@ namespace oceanbase
         // 分配内存
         char *pkey = set_key_to_buf(NULL, key);
         // 插入一个key
-        ret = put_pair(handle, pkey, reinterpret_cast<char*>(value), true);
+        ret = put_pair(handle, pkey, reinterpret_cast<char*>(value), value_overwrite);
         old_value = (V)(long)handle.get_old_value();
-        if (key_allocator_ && ret != ERROR_CODE_OK)
+        if (ERROR_CODE_OK == ret)
+        {
+          // 覆盖旧Key
+          char *ptr = handle.get_old_key();
+
+          if (key_overwrite && ptr)
+          {
+            if (key_allocator_)
+            {
+              K *pk = reinterpret_cast<K *>(const_cast<char *>(ptr + sizeof(int32_t)));
+              *pk = key;
+            }
+            else
+            {
+              memcpy(&ptr, &key, type_size_);
+            }
+          }
+        }
+        else if (key_allocator_)
         {
           key_allocator_->release(pkey);
         }

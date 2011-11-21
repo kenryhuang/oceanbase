@@ -25,6 +25,7 @@ import com.taobao.oceanbase.network.packet.GetPacket;
 import com.taobao.oceanbase.network.packet.GetSchemaPacket;
 import com.taobao.oceanbase.network.packet.GetSchemaResponsePacket;
 import com.taobao.oceanbase.network.packet.GetUpdateServerPacket;
+import com.taobao.oceanbase.network.packet.OBIConfigResponseInfo;
 import com.taobao.oceanbase.network.packet.OBIRoleResponseInfo;
 import com.taobao.oceanbase.network.packet.ObGetUpdateServerInfoResponse;
 import com.taobao.oceanbase.network.packet.ObScanRequest;
@@ -111,26 +112,35 @@ public class RootServer {
 		return new Result<ObSchemaManagerV2>(code, response.getSchema());
 	}
 
-	public MergeServer getMergeServer(SessionFactory factory,String table, String rowkey, int timeout) {
+	public MergeServer getMergeServer(SessionFactory factory, String table,
+			String rowkey, int timeout) {
 		NavigableCache<String, ObRow> tablets = tabletsCache.get(table);
-		if(tablets == null){
-			tabletsCache.putIfAbsent(table, new NavigableCache<String, ObRow>(1000));
+		if (tablets == null) {
+			tabletsCache.putIfAbsent(table, new NavigableCache<String, ObRow>(
+					1000));
 			tablets = tabletsCache.get(table);
 		}
 		ObRow tablet = tablets.get(rowkey);
-		if (tablet == null || tablet.isFull() == false) {
-			tablet = getTablet(table, rowkey);
-		} else {
-			log.debug("tablet cache hit");
+		try {
+			if (tablet == null || tablet.isFull() == false) {
+				tablet = getTablet(table, rowkey);
+			} else {
+				log.debug("tablet cache hit");
+			}
+		} catch (RuntimeException e) {
+			tablet = null;
 		}
-		List<MergeServer> servers = getMergeServer(factory,tablet, timeout);
+		MergeServer target = null;
+		List<MergeServer> servers = getMergeServer(factory, tablet, timeout);
 		if (servers.size() == 0) {
 			tablets.removeIfExpired(rowkey);
-			throw new NoMergeServerException("can not find valid mergeserver");
+			// throw new
+			// NoMergeServerException("can not find valid mergeserver");
+		} else {
+			int index = tablet.incrAndGetIndex() % servers.size();
+			target = servers.get(index);
+			log.debug("request will route to mergeserver: " + target);
 		}
-		int index = tablet.incrAndGetIndex() % servers.size();
-		MergeServer target = servers.get(index);
-		log.debug("request will route to mergeserver: " + target);
 		return target;
 	}
 	
@@ -142,6 +152,7 @@ public class RootServer {
 		ObRange range = new ObRange(query.getStartKey(), query.getEndKey(),
 				new ObBorderFlag(start, end, min, max));
 		ObScanParam param = new ObScanParam();
+		param.setReadConsistency(false);
 		param.set(table, range);
 		if (query.getPageNum() == 0) {
 			param.setLimit(0, query.getLimit());
@@ -172,7 +183,7 @@ public class RootServer {
 
 	private List<MergeServer> getMergeServer(SessionFactory factory, ObRow tablet, int timeout) {
 		List<MergeServer> servers = new ArrayList<MergeServer>();
-		for (int index = 1; index < 4; index++) {
+		for (int index = 1; index < 4 && tablet != null; index++) {
 			Long ip = tablet.getValueByColumnName(index + "_ipv4");
 			Long port = tablet.getValueByColumnName(index + "_ms_port");
 			if (ip != null && ip != 0 && port != null && port != 0) {
@@ -228,6 +239,7 @@ public class RootServer {
 	private List<ObRow> getTablets(String table, String rowkey) {
 		ObGetParam param = new ObGetParam(1);
 		param.addCell(new ObCell(table, rowkey, "*", null));
+		param.setReadConsistency(false);
 		GetPacket packet = new GetPacket(request.incrementAndGet(), param);
 		ResponsePacket response = null;
 		try {
@@ -286,6 +298,23 @@ public class RootServer {
 			log.debug("this instance is not a master instance ");
 		}
 		return ret;
+	}
+	
+	public int getReadPercent() {
+		CommandPacket packet = new CommandPacket(PacketCode.OB_GET_OBI_CONFIG,
+				request.incrementAndGet());
+		
+		OBIConfigResponseInfo response = null;
+		try {
+			response = server.commit(packet);
+		} catch (ConnectException e) {
+			Helper.sleep(Const.MIN_TIMEOUT);
+			throw new TimeOutException("get role info timeout" + e);
+		}
+		if (!(ResultCode.OB_SUCCESS == ResultCode.getResultCode(response
+				.getResultCode())))
+			throw new RuntimeException("get role info  error");
+		return response.getReadPercent();
 	}
 	
 	public String toString(){

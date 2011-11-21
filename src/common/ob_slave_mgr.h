@@ -69,8 +69,13 @@ namespace oceanbase
       virtual ~ObSlaveMgr();
 
       /// @brief 初始化
-      int init(const uint32_t vip, ObCommonRpcStub *rpc_stub, int64_t log_sync_timeout,
-          int64_t lease_interval, int64_t lease_reserved_time, int64_t send_retry_times = DEFAULT_SEND_LOG_RETRY_TIMES);
+      int init(const uint32_t vip,
+               ObCommonRpcStub *rpc_stub,
+               int64_t log_sync_timeout,
+               int64_t lease_interval,
+               int64_t lease_reserved_time,
+               int64_t send_retry_times = DEFAULT_SEND_LOG_RETRY_TIMES,
+               bool exist_wait_lease_on = false);
 
       /// reset vip (for debug only)
       void reset_vip(const int32_t vip) {vip_ = vip;}
@@ -141,6 +146,7 @@ namespace oceanbase
       ServerNode slave_head_;  //slave链表头
       ObCommonRpcStub *rpc_stub_;
       tbutil::Mutex slave_info_mutex_;
+      bool slave_fail_wait_lease_on_;
       bool is_initialized_;
     };
   } // end namespace common

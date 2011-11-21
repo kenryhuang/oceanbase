@@ -104,6 +104,11 @@ namespace oceanbase
 
       if (ret == OB_SUCCESS)
       {
+        ret = set_min_left_time(ms_params_.get_task_left_time());
+      }
+
+      if (ret == OB_SUCCESS)
+      {
         ret = set_packet_factory(&packet_factory_);
       }
 
@@ -196,6 +201,31 @@ namespace oceanbase
       return client_manager_;
     }
 
+    // overflow packet
+    bool ObMergeServer::handle_overflow_packet(ObPacket* base_packet)
+    {
+      handle_no_response_request(base_packet);
+      // must return false
+      return false;
+    }
+
+    void ObMergeServer::handle_no_response_request(ObPacket * base_packet)
+    {
+      if (NULL == base_packet || !base_packet->isRegularPacket())
+      {
+        TBSYS_LOG(WARN, "packet is illegal, discard.");
+      }
+      else
+      {
+        service_.handle_failed_request(base_packet->get_source_timeout(), base_packet->get_packet_code());
+      }
+    }
+
+    void ObMergeServer::handle_timeout_packet(ObPacket* base_packet)
+    {
+      handle_no_response_request(base_packet);
+    }
+
     IPacketHandler::HPRetCode ObMergeServer::handlePacket(Connection *connection, Packet *packet)
     {
       IPacketHandler::HPRetCode rc = IPacketHandler::FREE_CHANNEL;
@@ -230,10 +260,9 @@ namespace oceanbase
       int32_t version = ob_packet->get_api_version();
       int32_t channel_id = ob_packet->getChannelId();
       ret = ob_packet->deserialize();
-
       if (OB_SUCCESS == ret)
       {
-        FILL_TRACE_LOG("start handle get, packet wait=%ld", 
+        FILL_TRACE_LOG("start handle get, packet wait=%ld",
                        tbsys::CTimeUtil::getTime() - ob_packet->get_receive_ts());
         ObDataBuffer* in_buffer = ob_packet->get_buffer();
         if (NULL == in_buffer)
@@ -243,17 +272,16 @@ namespace oceanbase
         else
         {
           tbnet::Connection* connection = ob_packet->get_connection();
-          ThreadSpecificBuffer::Buffer* thread_buffer =
-          response_buffer_.get_buffer();
+          ThreadSpecificBuffer::Buffer* thread_buffer = response_buffer_.get_buffer();
           if (NULL != thread_buffer)
           {
             thread_buffer->reset();
             ObDataBuffer out_buffer(thread_buffer->current(), thread_buffer->remain());
-            //TODO read thread stuff multi thread 
+            //TODO read thread stuff multi thread
             TBSYS_LOG(DEBUG, "handle packet, packe code is %d, packet:%p",
                       packet_code, ob_packet);
-            ret = service_.do_request(packet_code, version, channel_id, connection,
-                *in_buffer, out_buffer);
+            ret = service_.do_request(ob_packet->get_receive_ts(), packet_code, version,
+                channel_id, connection, *in_buffer, out_buffer);
           }
           else
           {

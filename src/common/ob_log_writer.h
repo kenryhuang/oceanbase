@@ -127,11 +127,14 @@ namespace oceanbase
 
       inline void set_cur_log_seq(uint64_t cur_log_seq) {cur_log_seq_ = cur_log_seq;}
       inline uint64_t get_cur_log_seq() {return cur_log_seq_;}
+      inline uint64_t get_cur_log_offset() {return cur_log_size_;}
 
       inline ObSlaveMgr* get_slave_mgr() {return slave_mgr_;}
 
       inline int64_t get_last_net_elapse() {return last_net_elapse_;}
       inline int64_t get_last_disk_elapse() {return last_disk_elapse_;}
+
+      inline bool get_is_log_start() {return is_log_start_;}
 
     protected:
       /// @brief 打开文件id为log_file_id的日志文件
@@ -172,6 +175,7 @@ namespace oceanbase
       char empty_log_[LOG_FILE_ALIGN_SIZE * 2];
       bool is_initialized_;
       bool dio_;
+      bool is_log_start_;
     };
   } // end namespace common
 } // end namespace oceanbase

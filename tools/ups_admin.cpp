@@ -27,6 +27,18 @@
 
 const int64_t timeout = 100 * 1000 * 1000L;
 
+void delay_drop_memtable(MockClient &client)
+{
+  int err = client.delay_drop_memtable(timeout);
+  fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
+}
+
+void immediately_drop_memtable(MockClient &client)
+{
+  int err = client.immediately_drop_memtable(timeout);
+  fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
+}
+
 void enable_memtable_checksum(MockClient &client)
 {
   int err = client.enable_memtable_checksum(timeout);
@@ -179,9 +191,10 @@ void priv_queue_conf(const char* conf_str, MockClient &client)
 {
   UpsPrivQueueConf param;
   UpsPrivQueueConf priv_queue_conf;
-  sscanf(conf_str, "%ld%ld%ld%ld%ld", &param.low_priv_network_lower_limit,
-      &param.low_priv_network_upper_limit, &param.high_priv_max_wait_time_ms,
-      &param.high_priv_adjust_time_ms, &param.high_priv_cur_wait_time_ms);
+  sscanf(conf_str, "%ld%ld%ld%ld", &param.low_priv_network_lower_limit,
+      &param.low_priv_network_upper_limit, &param.low_priv_adjust_flag,
+      &param.low_priv_cur_percent);
+
   int err = client.priv_queue_conf(param, priv_queue_conf, timeout);
   fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
   if (OB_SUCCESS == err)
@@ -189,9 +202,8 @@ void priv_queue_conf(const char* conf_str, MockClient &client)
     fprintf(stdout, "priv_queue_conf err=%d\n", err);
     fprintf(stdout, "low_priv_network_lower_limit=%ld\n", priv_queue_conf.low_priv_network_lower_limit);
     fprintf(stdout, "low_priv_network_upper_limit=%ld\n", priv_queue_conf.low_priv_network_upper_limit);
-    fprintf(stdout, "high_priv_max_wait_time_ms=%ld\n", priv_queue_conf.high_priv_max_wait_time_ms);
-    fprintf(stdout, "high_priv_adjust_time_ms=%ld\n", priv_queue_conf.high_priv_adjust_time_ms);
-    fprintf(stdout, "high_priv_cur_wait_time_ms=%ld\n", priv_queue_conf.high_priv_cur_wait_time_ms);
+    fprintf(stdout, "low_priv_adjust_flag=%ld\n", priv_queue_conf.low_priv_adjust_flag);
+    fprintf(stdout, "low_priv_cur_percent=%ld\n", priv_queue_conf.low_priv_cur_percent);
   }
 }
 
@@ -218,6 +230,28 @@ void force_fetch_schema(MockClient &client)
   fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
 }
 
+void get_clog_cursor(MockClient &client)
+{
+  int err = OB_SUCCESS;
+  ObLogCursor log_cursor;
+  if (OB_SUCCESS != (err = client.get_max_clog_id(log_cursor, timeout)))
+  {
+    TBSYS_LOG(ERROR, "client.get_max_clog_id()=>%d", err);
+  }
+  fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
+  fprintf(stdout, "log_file_id=%lu, log_seq_id=%lu, log_offset=%lu\n", log_cursor.file_id_, log_cursor.log_id_, log_cursor.offset_);
+}
+
+void get_clog_master(MockClient &client)
+{
+  ObServer server;
+  int err = client.get_clog_master(server, timeout);
+  char addr[256];
+  fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
+  server.to_string(addr, sizeof(addr));
+  fprintf(stdout, "%s\n", addr);
+}
+
 void reload_conf(const char* fname, MockClient &client)
 {
   int err = client.reload_conf(fname, timeout);
@@ -234,6 +268,64 @@ void apply(const char *fname, PageArena<char> &allocer, MockClient &client)
   fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
 }
 
+void total_scan(const char *fname, PageArena<char> &allocer, MockClient &client, const char *version_range)
+{
+  ObScanner scanner;
+  ObScanParam scan_param;
+  read_scan_param(fname, SCAN_PARAM_SECTION, allocer, scan_param);
+  scan_param.set_version_range(str2range(version_range));
+  scan_param.set_is_read_consistency(false);
+
+  int64_t total_row = 0;
+  int64_t total_timeu = 0;
+  while (true)
+  {
+    int64_t timeu = tbsys::CTimeUtil::getTime();
+    int err = client.ups_scan(scan_param, scanner, timeout);
+    timeu = tbsys::CTimeUtil::getTime() - timeu;
+    if (OB_SUCCESS != err)
+    {
+      fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
+      break;
+    }
+    else
+    {
+      //int64_t row_counter = 0;
+      //while (OB_SUCCESS == scanner.next_cell())
+      //{
+      //  ObCellInfo *ci = NULL;
+      //  bool is_row_changed = false;
+      //  scanner.get_cell(&ci, &is_row_changed);
+      //  fprintf(stdout, "%s\n", updateserver::print_cellinfo(ci, "CLI_SCAN"));
+      //  if (is_row_changed)
+      //  {
+      //    row_counter++;
+      //  }
+      //}
+      bool is_fullfilled = false;
+      int64_t fullfilled_num = 0;
+      ObString last_rk;
+      scanner.get_last_row_key(last_rk);
+      scanner.get_is_req_fullfilled(is_fullfilled, fullfilled_num);
+      fprintf(stdout, "[SINGLE_SCAN] is_fullfilled=%s fullfilled_num=%ld timeu=%ld last_row_key=[%s]\n",
+              STR_BOOL(is_fullfilled), fullfilled_num, timeu, print_string(last_rk));
+      if (0 == fullfilled_num)
+      {
+        break;
+      }
+      else
+      {
+        total_row += fullfilled_num;
+        total_timeu += timeu;
+        const_cast<ObRange*>(scan_param.get_range())->start_key_ = last_rk;
+        const_cast<ObRange*>(scan_param.get_range())->border_flag_.unset_min_value();
+        const_cast<ObRange*>(scan_param.get_range())->border_flag_.unset_inclusive_start();
+      }
+    }
+  }
+  fprintf(stdout, "[TOTAL_SCAN] total_row=%ld total_timeu=%ld\n", total_row, total_timeu);
+}
+
 int scan(const char *fname, PageArena<char> &allocer, MockClient &client, const char *version_range,
          const char * expect_result_fname, const char *schema_fname)
 {
@@ -241,6 +333,7 @@ int scan(const char *fname, PageArena<char> &allocer, MockClient &client, const 
   ObScanParam scan_param;
   read_scan_param(fname, SCAN_PARAM_SECTION, allocer, scan_param);
   scan_param.set_version_range(str2range(version_range));
+  scan_param.set_is_read_consistency(false);
   int err = client.ups_scan(scan_param, scanner, timeout);
   fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
   bool res = true;
@@ -318,6 +411,7 @@ int param_get(const char *fname, MockClient &client)
       }
       else
       {
+        get_param.set_is_read_consistency(false);
         ObScanner scanner;
         int err = client.ups_get(get_param, scanner, timeout);
         fprintf(stdout, "[%s] err=%d\n", __FUNCTION__, err);
@@ -357,6 +451,7 @@ int get(const char *fname, PageArena<char> &allocer, MockClient &client, const c
   ObScanner scanner;
   ObGetParam get_param;
   read_get_param(fname, GET_PARAM_SECTION, allocer, get_param);
+  get_param.set_is_read_consistency(false);
   get_param.set_version_range(str2range(version_range));
   int err = client.ups_get(get_param, scanner, timeout);
   bool res = true;
@@ -421,7 +516,7 @@ void fetch_schema(MockClient &client, int64_t timestamp)
   ObSchemaManagerV2 *schema_mgr = new(std::nothrow) ObSchemaManagerV2();
   if (NULL == schema_mgr)
   {
-    fprintf(stdout, "[%s] new ObSchemaManagerV2 fail\n", __FUNCTION__); 
+    fprintf(stdout, "[%s] new ObSchemaManagerV2 fail\n", __FUNCTION__);
   }
   else
   {
@@ -494,16 +589,17 @@ void print_usage()
   fprintf(stdout, "ups_ctrl [OPTION]\n");
   fprintf(stdout, "   -a|--serv_addr server address\n");
   fprintf(stdout, "   -p|--serv_port server port\n");
-  fprintf(stdout, "   -t|--cmd_type command type[apply|get|param_get|scan|minor_freeze|major_freeze|fectch_schema|drop|dump_memtable|dump_schemas|force_fetch_schema|"
+  fprintf(stdout, "   -t|--cmd_type command type[apply|get|get_clog_cursor|get_clog_master|param_get|scan|total_scan|minor_freeze|major_freeze|fectch_schema|drop|dump_memtable|dump_schemas|force_fetch_schema|"
           "reload_conf|memory_watch|memory_limit|priv_queue_conf|clear_active_memtable|get_last_frozen_version|fetch_ups_stat_info|get_bloomfilter|"
-          "store_memtable|erase_sstable|load_new_store|reload_all_store|reload_store|umount_store|force_report_frozen_version|switch_commit_log|get_table_time_stamp]"
-          "enable_memtable_checksum|disable_memtable_checksum\n");
+          "store_memtable|erase_sstable|load_new_store|reload_all_store|reload_store|umount_store|force_report_frozen_version|switch_commit_log|get_table_time_stamp|"
+          "enable_memtable_checksum|disable_memtable_checksum|"
+          "delay_drop_memtable|immediately_drop_memtable]\n");
   fprintf(stdout, "   -f|--ini_fname ini file name\n");
   fprintf(stdout, "   -s|--timestamp must be set while cmd_type is [fectch_schema|get_bloomfilter|reload_store|get_table_time_stamp], optional for [store_memtable]\n");
   fprintf(stdout, "   -r|--version_range must be set while cmd_type is [get|scan]\n");
   fprintf(stdout, "   -l|--memory_limit could be set while cmd_type is memory_limit\n");
   fprintf(stdout, "   -c|--memtable_limit could be set while cmd_type is memory_limit\n");
-  fprintf(stdout, "   -q|--priv_queue_conf network_lower_limit network_upper_limit max_wait_time_ms adjust_time_ms cur_wait_time_ms\n");
+  fprintf(stdout, "   -q|--priv_queue_conf network_lower_limit network_upper_limit adjust_flag low_priv_cur_percent\n");
   fprintf(stdout, "   -e|--expect_result expected result of the read operation [optional]\n");
   fprintf(stdout, "   -m|--schema schema of expect_result [must specify when -e was given]\n");
   fprintf(stdout, "   -h|--help print this help info\n");
@@ -588,11 +684,13 @@ void parse_cmd_line(int argc, char **argv, CmdLineParam &clp)
       || NULL == clp.cmd_type
       || (NULL == clp.ini_fname && 0 == strcmp("apply", clp.cmd_type))
       || (NULL == clp.ini_fname && 0 == strcmp("scan", clp.cmd_type))
+      || (NULL == clp.ini_fname && 0 == strcmp("total_scan", clp.cmd_type))
       || (NULL == clp.ini_fname && 0 == strcmp("get", clp.cmd_type))
       || (NULL == clp.ini_fname && 0 == strcmp("param_get", clp.cmd_type))
       || (NULL == clp.ini_fname && 0 == strcmp("reload_conf", clp.cmd_type))
       || (NULL == clp.ini_fname && 0 == strcmp("umount_store", clp.cmd_type))
       || (NULL == clp.version_range && 0 == strcmp("scan", clp.cmd_type))
+      || (NULL == clp.version_range && 0 == strcmp("total_scan", clp.cmd_type))
       || (NULL == clp.version_range && 0 == strcmp("get", clp.cmd_type))
       || (0 == clp.timestamp && 0 == strcmp("get_bloomfilter", clp.cmd_type))
       || (0 == clp.timestamp && 0 == strcmp("fectch_schema", clp.cmd_type))
@@ -623,7 +721,7 @@ int main(int argc, char** argv)
   parse_cmd_line(argc, argv, clp);
 
   MockClient client;
-  init_mock_client(clp.serv_addr, clp.serv_port, client);  
+  init_mock_client(clp.serv_addr, clp.serv_port, client);
 
   PageArena<char> allocer;
 
@@ -631,9 +729,17 @@ int main(int argc, char** argv)
   {
     apply(clp.ini_fname, allocer, client);
   }
+  else if (0 == strcmp("get_clog_cursor", clp.cmd_type))
+  {
+    get_clog_cursor(client);
+  }
+  else if (0 == strcmp("get_clog_master", clp.cmd_type))
+  {
+    get_clog_master(client);
+  }
   else if (0 == strcmp("get", clp.cmd_type))
   {
-    get(clp.ini_fname, allocer, client, clp.version_range,clp.expected_result_fname, 
+    get(clp.ini_fname, allocer, client, clp.version_range,clp.expected_result_fname,
       clp.schema_fname);
   }
   else if (0 == strcmp("param_get", clp.cmd_type))
@@ -644,6 +750,10 @@ int main(int argc, char** argv)
   {
     scan(clp.ini_fname, allocer, client, clp.version_range,clp.expected_result_fname,
       clp.schema_fname);
+  }
+  else if (0 == strcmp("total_scan", clp.cmd_type))
+  {
+    total_scan(clp.ini_fname, allocer, client, clp.version_range);
   }
   else if (0 == strcmp("minor_freeze", clp.cmd_type))
   {
@@ -740,6 +850,22 @@ int main(int argc, char** argv)
   else if (0 == strcmp("get_table_time_stamp", clp.cmd_type))
   {
     get_table_time_stamp(client, clp.timestamp);
+  }
+  else if (0 == strcmp("disable_memtable_checksum", clp.cmd_type))
+  {
+    disable_memtable_checksum(client);
+  }
+  else if (0 == strcmp("enable_memtable_checksum", clp.cmd_type))
+  {
+    enable_memtable_checksum(client);
+  }
+  else if (0 == strcmp("immediately_drop_memtable", clp.cmd_type))
+  {
+    immediately_drop_memtable(client);
+  }
+  else if (0 == strcmp("delay_drop_memtable", clp.cmd_type))
+  {
+    delay_drop_memtable(client);
   }
   else
   {

@@ -706,7 +706,7 @@ int ObRootServerRpcStub::get_update_server(common::ObServer& update_server,bool 
                                   DEFAULT_VERSION, timeout, data_buff);
     if (ret != OB_SUCCESS)
     {
-      TBSYS_LOG(ERROR, "send request to root server for register server failed:ret[%d]", ret);
+      TBSYS_LOG(ERROR, "send request to root server for get update server addr failed:ret[%d]", ret);
     }
   }
 
@@ -1093,6 +1093,7 @@ int ObRootServerRpcStub::get_tablet_info(const common::ObSchemaManagerV2& schema
   if (OB_SUCCESS == ret)
   {
     param.set(OB_INVALID_ID,table_name,range); //use table name
+    param.set_is_read_consistency(false);
   }
 
   if ((OB_SUCCESS == ret) && ((ret = scan(root_server_,timeout,param,scanner)) != OB_SUCCESS) )

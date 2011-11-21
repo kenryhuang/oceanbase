@@ -63,7 +63,8 @@ TEST_F(TestTabletLocationItem, test_add)
   EXPECT_TRUE(ObMergerTabletLocationList::MAX_REPLICA_COUNT == list.size());
 }
 
-TEST_F(TestTabletLocationItem, test_invalid)
+
+TEST_F(TestTabletLocationItem, test_valid)
 {
   ObMergerTabletLocationList list;
   ObTabletLocation temp_server;
@@ -76,8 +77,46 @@ TEST_F(TestTabletLocationItem, test_invalid)
     EXPECT_TRUE(OB_SUCCESS == list.add(temp_server));
   }
   
+  // all invalid 
   ObMergerTabletLocation server;
-  
+  for (int64_t i = 0; i < ObMergerTabletLocationList::MAX_REPLICA_COUNT; ++i)
+  {
+    chunkserver.set_ipv4_addr(i + 300000, i + 1024);
+    server.server_.chunkserver_ = chunkserver;
+    server.server_.tablet_version_ = i;
+    EXPECT_TRUE(OB_SUCCESS == list.set_item_invalid(server));
+    EXPECT_TRUE(list[i].err_times_ == ObMergerTabletLocation::MAX_ERR_TIMES);
+    EXPECT_TRUE(list.get_valid_count() == ObMergerTabletLocationList::MAX_REPLICA_COUNT - i - 1);
+  }
+
+  list.set_item_valid(1100);
+  EXPECT_TRUE(list.get_timestamp() == 1100);
+  EXPECT_TRUE(list.get_valid_count() == ObMergerTabletLocationList::MAX_REPLICA_COUNT);
+  for (int64_t i = 0; i < ObMergerTabletLocationList::MAX_REPLICA_COUNT; ++i)
+  {
+    EXPECT_TRUE(list[i].err_times_ == 0);
+  }
+}
+
+TEST_F(TestTabletLocationItem, test_invalid)
+{
+  ObMergerTabletLocationList list;
+  EXPECT_TRUE(list.get_valid_count() == 0);
+  ObTabletLocation temp_server;
+  ObServer chunkserver;
+  for (int64_t i = 0; i < ObMergerTabletLocationList::MAX_REPLICA_COUNT; ++i)
+  {
+    chunkserver.set_ipv4_addr(i + 300000, i + 1024);
+    temp_server.tablet_version_ = i;
+    temp_server.chunkserver_ = chunkserver;
+    EXPECT_TRUE(OB_SUCCESS == list.add(temp_server));
+    EXPECT_TRUE(list.get_valid_count() == i + 1);
+  }
+
+  EXPECT_TRUE(list.get_valid_count() == ObMergerTabletLocationList::MAX_REPLICA_COUNT);
+
+  ObMergerTabletLocation server;
+
   // not exist
   for (int64_t i = 0; i < ObMergerTabletLocationList::MAX_REPLICA_COUNT; ++i)
   {
@@ -86,6 +125,7 @@ TEST_F(TestTabletLocationItem, test_invalid)
     server.server_.tablet_version_ = i;
     EXPECT_TRUE(OB_SUCCESS != list.set_item_invalid(server));
     EXPECT_TRUE(list[i].err_times_ != ObMergerTabletLocation::MAX_ERR_TIMES);
+    EXPECT_TRUE(list.get_valid_count() == ObMergerTabletLocationList::MAX_REPLICA_COUNT);
   }
 
   // set second invalid
@@ -93,10 +133,11 @@ TEST_F(TestTabletLocationItem, test_invalid)
   server.server_.chunkserver_ = chunkserver;
   server.server_.tablet_version_ = 1;
   EXPECT_TRUE(OB_SUCCESS == list.set_item_invalid(server));
+  EXPECT_TRUE(list.get_valid_count() == ObMergerTabletLocationList::MAX_REPLICA_COUNT - 1);
   EXPECT_TRUE(list[1].err_times_ == ObMergerTabletLocation::MAX_ERR_TIMES);
   EXPECT_TRUE(list[0].err_times_ != ObMergerTabletLocation::MAX_ERR_TIMES);
   EXPECT_TRUE(list[2].err_times_ != ObMergerTabletLocation::MAX_ERR_TIMES);
-  
+
   // all invalid 
   for (int64_t i = 0; i < ObMergerTabletLocationList::MAX_REPLICA_COUNT; ++i)
   {
@@ -106,7 +147,9 @@ TEST_F(TestTabletLocationItem, test_invalid)
     EXPECT_TRUE(OB_SUCCESS == list.set_item_invalid(server));
     EXPECT_TRUE(list[i].err_times_ == ObMergerTabletLocation::MAX_ERR_TIMES);
   }
-  
+
+  EXPECT_TRUE(list.get_valid_count() == 0);
+
   for (int64_t i = 0; i < ObMergerTabletLocationList::MAX_REPLICA_COUNT; ++i)
   {
     server.server_.tablet_version_ = i + 100;

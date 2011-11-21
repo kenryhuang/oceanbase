@@ -31,6 +31,7 @@ ObLogWriter::ObLogWriter()
   cur_log_seq_ = 0;
   slave_mgr_ = NULL;
   log_sync_type_ = OB_LOG_NOSYNC;
+  is_log_start_ = false;
   memset(empty_log_, 0x00, sizeof(empty_log_));
 }
 
@@ -143,6 +144,7 @@ int ObLogWriter::start_log(const uint64_t log_file_max_id, const uint64_t log_ma
       else
       {
         TBSYS_LOG(INFO, "commit log cur_log_file_id_=%lu cur_log_size_=%ld", cur_log_file_id_, cur_log_size_);
+        is_log_start_ = true;
       }
     }
   }
@@ -164,6 +166,10 @@ int ObLogWriter::start_log(const uint64_t log_file_max_id)
     if (OB_SUCCESS != ret)
     {
       TBSYS_LOG(ERROR, "open_log_file_ error[ret=%d]", ret);
+    }
+    else
+    {
+        is_log_start_ = true;
     }
   }
 
@@ -466,7 +472,7 @@ int ObLogWriter::open_log_file_(const uint64_t log_file_id, bool is_trunc)
     else
     {
       int fn_len = strlen(file_name);
-      ret = file_.open(ObString(fn_len, fn_len, file_name), dio_, true, is_trunc);
+      ret = file_.open(ObString(fn_len, fn_len, file_name), dio_, true, is_trunc, LOG_FILE_ALIGN_SIZE);
       if (OB_SUCCESS != ret)
       {
         TBSYS_LOG(ERROR, "open commit log file[file_name=%s] ret=%d", file_name, ret);

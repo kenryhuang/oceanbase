@@ -44,8 +44,8 @@ namespace oceanbase
         char lf[BUFSIZ];
         memset(lf, 'A', BUFSIZ);
         lf[BUFSIZ - 1] = '\0';
-        ASSERT_EQ(OB_INVALID_ARGUMENT, log_reader.init(lf, 0, false));
-        ASSERT_EQ(OB_INVALID_ARGUMENT, log_reader.init(NULL, 0, false));
+        ASSERT_EQ(OB_INVALID_ARGUMENT, log_reader.init(lf, 0, 0, false));
+        ASSERT_EQ(OB_INVALID_ARGUMENT, log_reader.init(NULL, 0, 0, false));
 
         int64_t log_file_max_size = 1L << 24;
         uint64_t log_file_max_id = 1100;
@@ -71,7 +71,7 @@ namespace oceanbase
         uint64_t s1;
         char* buf1;
         int64_t len1;
-        ASSERT_EQ(OB_SUCCESS, log_reader.init(log_dir, log_file_max_id, false));
+        ASSERT_EQ(OB_SUCCESS, log_reader.init(log_dir, log_file_max_id, 0, false));
 
         ASSERT_EQ(OB_SUCCESS, log_reader.read_log(cmd1, s1, buf1, len1));
         ASSERT_EQ(OB_LOG_UPS_MUTATOR, cmd1);
@@ -90,7 +90,7 @@ namespace oceanbase
         ASSERT_EQ(OB_READ_NOTHING, log_reader.read_log(cmd1, s1, buf1, len1));
 
         ObLogReader log_reader3;
-        ASSERT_EQ(OB_SUCCESS, log_reader3.init(log_dir, log_file_max_id, true));
+        ASSERT_EQ(OB_SUCCESS, log_reader3.init(log_dir, log_file_max_id, 0, true));
         log_reader3.set_max_log_file_id(0);
         ASSERT_EQ(OB_READ_NOTHING, log_reader3.read_log(cmd1, s1, buf1, len1));
         log_reader3.set_max_log_file_id(log_file_max_id);
@@ -136,7 +136,7 @@ namespace oceanbase
         system(cmd);
 
         ObLogReader log_reader2;
-        ASSERT_EQ(OB_SUCCESS, log_reader2.init(log_dir, log_file_max_id - 10, false));
+        ASSERT_EQ(OB_SUCCESS, log_reader2.init(log_dir, log_file_max_id - 10, 0, false));
         ASSERT_EQ(OB_SUCCESS, log_reader2.read_log(cmd1, s1, buf1, len1));
         ASSERT_EQ(OB_LOG_UPS_MUTATOR, cmd1);
         ASSERT_EQ(log_max_seq + 1, s1);

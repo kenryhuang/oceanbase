@@ -135,37 +135,37 @@ namespace oceanbase
       private:
         // BASIC_PARAM_FIELD
         int serialize_basic_param(char * buf, const int64_t buf_len, int64_t & pos) const;
-        int deserialize_basic_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj);
+        int deserialize_basic_param(const char * buf, const int64_t data_len, int64_t & pos);
         int64_t get_basic_param_serialize_size(void) const;
         
         // COLUMN_PARAM_FIELD
         int serialize_column_param(char * buf, const int64_t buf_len, int64_t & pos) const;
-        int deserialize_column_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj);
+        int deserialize_column_param(const char * buf, const int64_t data_len, int64_t & pos);
         int64_t get_column_param_serialize_size(void) const;
 
         // FILTER_PARAM_FILED
         int serialize_filter_param(char * buf, const int64_t buf_len, int64_t & pos) const;
-        int deserialize_filter_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj);
+        int deserialize_filter_param(const char * buf, const int64_t data_len, int64_t & pos);
         int64_t get_filter_param_serialize_size(void) const;
 
         // GROUPBY_PARAM_FILED
         int serialize_groupby_param(char * buf, const int64_t buf_len, int64_t & pos) const;
-        int deserialize_groupby_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj);
+        int deserialize_groupby_param(const char * buf, const int64_t data_len, int64_t & pos);
         int64_t get_groupby_param_serialize_size(void) const;
         
         // SORT_PARAM_FIELD
         int serialize_sort_param(char * buf, const int64_t buf_len, int64_t & pos) const;
-        int deserialize_sort_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj);
+        int deserialize_sort_param(const char * buf, const int64_t data_len, int64_t & pos);
         int64_t get_sort_param_serialize_size(void) const;
         
         // LIMIT_PARAM_FIELD
         int serialize_limit_param(char * buf, const int64_t buf_len, int64_t & pos) const;
-        int deserialize_limit_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj);
+        int deserialize_limit_param(const char * buf, const int64_t data_len, int64_t & pos);
         int64_t get_limit_param_serialize_size(void) const;  
 
         // END_PARAM_FIELD
         int serialize_end_param(char * buf, const int64_t buf_len, int64_t & pos) const;
-        int deserialize_end_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj);
+        int deserialize_end_param(const char * buf, const int64_t data_len, int64_t & pos);
         int64_t get_end_param_serialize_size(void) const;
       
       private:

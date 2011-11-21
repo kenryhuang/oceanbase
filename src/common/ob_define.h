@@ -71,6 +71,8 @@ namespace oceanbase
     const int OB_AIO_TIMEOUT = -35;
     const int OB_NEED_RETRY = -36; // need retry
     const int OB_TOO_MANY_SSTABLE = -37;
+    const int OB_NOT_MASTER = -38;
+    const int OB_NOT_REGISTERED = -39;
 
     //error code for chunk server -1001 ---- -2000
     const int OB_CS_CACHE_NOT_HIT = -1001;   // 缓存没有命中
@@ -113,6 +115,7 @@ namespace oceanbase
     const int OB_UPS_NOT_EXIST = -2005;         // not exist
     const int OB_UPS_ACQUIRE_TABLE_FAIL = -2006;// acquire table via version fail
     const int OB_UPS_INVALID_MAJOR_VERSION = -2007;
+    const int OB_UPS_TABLE_NOT_FROZEN = -2008;
 
     //error code for root server -3001 ---- -4000
     const int OB_ERROR_TIME_STAMP = -3001;
@@ -136,6 +139,7 @@ namespace oceanbase
     typedef ObPreciseDateTime ObCreateTime;
 
     const int64_t OB_OLD_MAX_COLUMN_NUMBER = 50;
+    const int64_t OB_MAX_SERVER_ADDR_SIZE = 128;
     const int64_t OB_MAX_COLUMN_NUMBER = 128;
     const int64_t OB_MAX_TABLE_NUMBER = 100;
     const int64_t OB_MAX_JOIN_INFO_NUMBER = 10;
@@ -161,6 +165,7 @@ namespace oceanbase
     const int64_t OB_DIRECT_IO_ALIGN = 512;
 
     const int64_t OB_MAX_RESULT_MESSAGE_LENGTH = 1024;
+    const int64_t OB_MAX_LOG_BUFFER_SIZE = 1966080L;  // 1.875MB
 
     const int32_t OB_SAFE_COPY_COUNT = 3;
 
@@ -225,6 +230,8 @@ virtual int serialize(char* buf, const int64_t buf_len, int64_t& pos) const; \
 
 #define OB_LIKELY(x)       __builtin_expect(!!(x),1)
 #define OB_UNLIKELY(x)     __builtin_expect(!!(x),0)
+
+#define ARRAYSIZEOF(a) (sizeof(a)/sizeof(a[0]))
 
 #define OB_ASSERT(x) assert(x)
 

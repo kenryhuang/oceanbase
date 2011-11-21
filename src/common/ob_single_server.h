@@ -31,7 +31,6 @@ namespace oceanbase
     class ObSingleServer : public ObBaseServer, public tbnet::IPacketQueueHandler
     {
       public:
-
         ObSingleServer();
         virtual ~ObSingleServer();
 
@@ -41,6 +40,9 @@ namespace oceanbase
 
         /** set worker thread count, default is 0 */
         int set_thread_count(const int thread_count);
+
+        /** set the min left time for checking the task should be timeout */
+        int set_min_left_time(const int64_t left_time);
 
         /** set the queue size of the default task queue */
         int set_default_queue_size(const int task_queue_size);
@@ -61,12 +63,15 @@ namespace oceanbase
           */
         virtual bool handle_overflow_packet(ObPacket* base_packet);
 
+        //handle packet which check timeout in the queue
+        virtual void handle_timeout_packet(ObPacket* base_packet);
+
       protected:
         void handle_request(ObPacket* request);
-
       private:
         int thread_count_;
         int task_queue_size_;
+        int64_t min_left_time_;
         ObPacketQueueThread default_task_queue_thread_;
     };
   } /* common */

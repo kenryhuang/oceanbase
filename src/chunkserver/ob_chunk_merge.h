@@ -58,11 +58,6 @@ namespace oceanbase
          */
         int schedule(const int64_t frozen_version);
 
-        inline const ObServer& get_update_server() const
-        {
-          return update_server_;
-        }
-
         inline const bool is_pending_in_upgrade() const
         {
           return pending_in_upgrade_;
@@ -79,7 +74,21 @@ namespace oceanbase
             newest_frozen_version_ = frozen_version;
         }
 
+        inline mergeserver::ObMSUpsStreamWrapper& get_ups_stream_wrapper()
+        {
+          return *ups_stream_wrapper_;
+        }
+
+        int fetch_update_server_list();
+
+        // for compatible with rootserver interface;
+        int fetch_update_server_for_merge();
+
+        void set_config_param();
+
         bool can_launch_next_round(const int64_t frozen_version);
+
+        int create_merge_threads(const int32_t max_merge_thread);
      
       private:
         static void* run(void *arg);
@@ -136,28 +145,29 @@ namespace oceanbase
 
         volatile int64_t merge_start_time_;    //this version start time
         volatile int64_t merge_last_end_time_;    //this version merged complete time
-        volatile int64_t max_merge_duration_;  //max merge time of a version
 
         ObTabletManager *tablet_manager_;
 
         common::ThreadSpecificBuffer last_end_key_buffer_;
         common::ThreadSpecificBuffer cur_row_key_buffer_;
         
-        ObExpiredSSTablePool expired_sstable_pool_;
-        ObServer update_server_;
-
         volatile uint32_t pending_merge_[common::OB_MAX_DISK_NUMBER]; //use atomic op
 
         volatile bool round_start_;
         volatile bool round_end_;
         volatile bool pending_in_upgrade_;
+
         int64_t merge_load_high_;
         int64_t request_count_high_;
         int64_t merge_adjust_ratio_;
         int64_t merge_load_adjust_;
+        int64_t merge_pause_row_count_;
+        int64_t merge_pause_sleep_time_;
+        int64_t merge_highload_sleep_time_;
 
         common::ObSchemaManagerV2 last_schema_;
         common::ObSchemaManagerV2 current_schema_;
+        mergeserver::ObMSUpsStreamWrapper *ups_stream_wrapper_;
     }; 
     
 
@@ -172,7 +182,6 @@ namespace oceanbase
 
       private:
         typedef common::ObBitmap<char, common::ModuleArena> ExpireRowFilter;
-        static const int64_t CHECK_LOAD_LINE_INTERVAL = 500;
 
         void reset();
 
@@ -209,7 +218,8 @@ namespace oceanbase
             const ExpireColumnInfo & expire_column_info,
             const int64_t split_row_pos, 
             const int64_t tablet_after_merge,
-            ExpireRowFilter & expire_row_filter
+            ExpireRowFilter & expire_row_filter,
+            bool &is_tablet_splited
             );
 
         int save_current_row(const bool current_row_expired);

@@ -147,6 +147,7 @@ int TaskFactory::init_scan_param(const uint64_t table_id, uint64_t & max_len, Ob
   version_range.border_flag_.set_inclusive_end();
   //version_range.border_flag_.set_max_value();
   param.set_version_range(version_range);
+  param.set_is_read_consistency(false);
   param.set_is_result_cached(false);
   int ret = get_max_len(table_id, max_len);
   if (ret != OB_SUCCESS)

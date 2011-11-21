@@ -50,6 +50,7 @@ namespace oceanbase
     }
     void BaseMain::sign_handler(const int sig)
     {
+      TBSYS_LOG(INFO, "receive signal sig=%d", sig);
       switch (sig) {
         case SIGTERM:
         case SIGINT:

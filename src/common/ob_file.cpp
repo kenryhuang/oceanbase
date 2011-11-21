@@ -75,7 +75,7 @@ namespace oceanbase
           }
           else
           {
-            TBSYS_LOG(INFO, "open fname=[%s] fd=%d succ", fname_ptr, fd);
+            TBSYS_LOG(INFO, "open fname=[%s] fd=%d flags=%d succ", fname_ptr, fd, file.get_open_flags());
           }
         }
         return ret;
@@ -383,180 +383,177 @@ namespace oceanbase
 
       ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-      //BufferFileAppender::BufferFileAppender(const int64_t buffer_size) : open_flags_(NORMAL_FLAGS),
-      //                                                                    buffer_size_(buffer_size),
-      //                                                                    buffer_pos_(0),
-      //                                                                    file_pos_(0),
-      //                                                                    buffer_(NULL)
-      //{
-      //}
+      BufferFileAppender::BufferFileAppender(const int64_t buffer_size) : open_flags_(NORMAL_FLAGS),
+                                                                          buffer_size_(buffer_size),
+                                                                          buffer_pos_(0),
+                                                                          file_pos_(0),
+                                                                          buffer_(NULL)
+      {
+      }
 
-      //BufferFileAppender::~BufferFileAppender()
-      //{
-      //  if (-1 != fd_)
-      //  {
-      //    this->close();
-      //  }
-      //  if (NULL != buffer_)
-      //  {
-      //    ::free(buffer_);
-      //    buffer_ = NULL;
-      //  }
-      //}
+      BufferFileAppender::~BufferFileAppender()
+      {
+        if (-1 != fd_)
+        {
+          this->close();
+        }
+        if (NULL != buffer_)
+        {
+          ::free(buffer_);
+          buffer_ = NULL;
+        }
+      }
 
-      //int BufferFileAppender::buffer_sync_()
-      //{
-      //  int ret = OB_SUCCESS;
-      //  if (NULL != buffer_
-      //      && 0 != buffer_pos_)
-      //  {
-      //    int64_t write_ret = 0;
-      //    if (buffer_pos_ != (write_ret = unintr_pwrite(fd_, buffer_, buffer_pos_, file_pos_)))
-      //    {
-      //      TBSYS_LOG(WARN, "write buffer fail fd=%d buffer=%p count=%ld offset=%ld write_ret=%ld errno=%u",
-      //                fd_, buffer_, buffer_pos_, file_pos_, write_ret, errno);
-      //      ret = OB_IO_ERROR;
-      //    }
-      //    else
-      //    {
-      //      file_pos_ += buffer_pos_;
-      //      buffer_pos_ = 0;
-      //    }
-      //  }
-      //  return ret;
-      //}
+      int BufferFileAppender::buffer_sync_()
+      {
+        int ret = OB_SUCCESS;
+        if (NULL != buffer_
+            && 0 != buffer_pos_)
+        {
+          int64_t write_ret = 0;
+          if (buffer_pos_ != (write_ret = unintr_pwrite(fd_, buffer_, buffer_pos_, file_pos_)))
+          {
+            TBSYS_LOG(WARN, "write buffer fail fd=%d buffer=%p count=%ld offset=%ld write_ret=%ld errno=%u",
+                      fd_, buffer_, buffer_pos_, file_pos_, write_ret, errno);
+            ret = OB_IO_ERROR;
+          }
+          else
+          {
+            file_pos_ += buffer_pos_;
+            buffer_pos_ = 0;
+          }
+        }
+        return ret;
+      }
 
-      //int BufferFileAppender::fsync()
-      //{
-      //  int ret = OB_SUCCESS;
-      //  if (-1 == fd_)
-      //  {
-      //    TBSYS_LOG(WARN, "file has not been open");
-      //    ret = OB_ERROR;
-      //  }
-      //  else if (OB_SUCCESS == (ret = buffer_sync_()))
-      //  {
-      //    if (0 != ::fsync(fd_))
-      //    {
-      //      TBSYS_LOG(WARN, "fsync fail fd=%d errno=%u", fd_, errno);
-      //      ret = OB_IO_ERROR;
-      //    }
-      //  }
-      //  return ret;
-      //}
+      int BufferFileAppender::fsync()
+      {
+        int ret = OB_SUCCESS;
+        if (-1 == fd_)
+        {
+          TBSYS_LOG(WARN, "file has not been open");
+          ret = OB_ERROR;
+        }
+        else if (OB_SUCCESS == (ret = buffer_sync_()))
+        {
+          if (0 != ::fsync(fd_))
+          {
+            TBSYS_LOG(WARN, "fsync fail fd=%d errno=%u", fd_, errno);
+            ret = OB_IO_ERROR;
+          }
+        }
+        return ret;
+      }
 
-      //int BufferFileAppender::async_append(const void *buf, const int64_t count, IFileAsyncCallback *callback)
-      //{
-      //  UNUSED(buf);
-      //  UNUSED(count);
-      //  UNUSED(callback);
-      //  return OB_NOT_SUPPORTED;
-      //}
+      int BufferFileAppender::async_append(const void *buf, const int64_t count, IFileAsyncCallback *callback)
+      {
+        UNUSED(buf);
+        UNUSED(count);
+        UNUSED(callback);
+        return OB_NOT_SUPPORTED;
+      }
 
-      //int BufferFileAppender::append(const void *buf, const int64_t count, const bool is_fsync)
-      //{
-      //  int ret = OB_SUCCESS;
-      //  if (-1 == fd_)
-      //  {
-      //    TBSYS_LOG(WARN, "file has not been open");
-      //    ret = OB_ERROR;
-      //  }
-      //  else if (0 == count)
-      //  {
-      //    // do nothing
-      //  }
-      //  else if (NULL == buf || 0 > count)
-      //  {
-      //    TBSYS_LOG(WARN, "invalid param buf=%p count=%ld", buf, count);
-      //    ret = OB_INVALID_ARGUMENT;
-      //  }
-      //  else
-      //  {
-      //    bool buffer_synced = false;
-      //    if ((buffer_size_ - buffer_pos_) < count)
-      //    {
-      //      ret = buffer_sync_();
-      //      buffer_synced = true;
-      //    }
+      int BufferFileAppender::append(const void *buf, const int64_t count, const bool is_fsync)
+      {
+        int ret = OB_SUCCESS;
+        if (-1 == fd_)
+        {
+          TBSYS_LOG(WARN, "file has not been open");
+          ret = OB_ERROR;
+        }
+        else if (0 == count)
+        {
+          // do nothing
+        }
+        else if (NULL == buf || 0 > count)
+        {
+          TBSYS_LOG(WARN, "invalid param buf=%p count=%ld", buf, count);
+          ret = OB_INVALID_ARGUMENT;
+        }
+        else
+        {
+          if ((buffer_size_ - buffer_pos_) < count)
+          {
+            ret = buffer_sync_();
+          }
 
-      //    if (OB_SUCCESS == ret)
-      //    {
-      //      if (buffer_synced
-      //          && buffer_size_ < count)
-      //      {
-      //        int64_t write_ret = 0;
-      //        if (count != (write_ret = unintr_pwrite(fd_, buf, count, file_pos_)))
-      //        {
-      //          TBSYS_LOG(WARN, "write fail fd=%d buffer=%p count=%ld offset=%ld write_ret=%ld errno=%u",
-      //                    fd_, buf, count, file_pos_, write_ret, errno);
-      //          ret = OB_IO_ERROR;
-      //        }
-      //        else 
-      //        {
-      //          file_pos_ += count;
-      //        }
-      //      }
-      //      else
-      //      {
-      //        memcpy(buffer_ + buffer_pos_, buf, count);
-      //        buffer_pos_ += count;
-      //      }
-      //    }
-      //  }
-      //  if (OB_SUCCESS == ret
-      //      && is_fsync)
-      //  {
-      //    ret = this->fsync();
-      //  }
-      //  return ret;
-      //}
+          if (OB_SUCCESS == ret)
+          {
+            if ((buffer_size_ - buffer_pos_) < count)
+            {
+              int64_t write_ret = 0;
+              if (count != (write_ret = unintr_pwrite(fd_, buf, count, file_pos_)))
+              {
+                TBSYS_LOG(WARN, "write fail fd=%d buffer=%p count=%ld offset=%ld write_ret=%ld errno=%u",
+                          fd_, buf, count, file_pos_, write_ret, errno);
+                ret = OB_IO_ERROR;
+              }
+              else 
+              {
+                file_pos_ += count;
+              }
+            }
+            else
+            {
+              memcpy(buffer_ + buffer_pos_, buf, count);
+              buffer_pos_ += count;
+            }
+          }
+        }
+        if (OB_SUCCESS == ret
+            && is_fsync)
+        {
+          ret = this->fsync();
+        }
+        return ret;
+      }
 
-      //int BufferFileAppender::prepare_buffer_()
-      //{
-      //  int ret = OB_SUCCESS;
-      //  if (NULL == buffer_
-      //      && NULL == (buffer_ = (char*)::malloc(buffer_size_)))
-      //  {
-      //    TBSYS_LOG(WARN, "prepare buffer fail buffer_size=%ld", buffer_size_);
-      //    ret = OB_ERROR;
-      //  }
-      //  return ret;
-      //}
+      int BufferFileAppender::prepare_buffer_()
+      {
+        int ret = OB_SUCCESS;
+        if (NULL == buffer_
+            && NULL == (buffer_ = (char*)::malloc(buffer_size_)))
+        {
+          TBSYS_LOG(WARN, "prepare buffer fail buffer_size=%ld", buffer_size_);
+          ret = OB_ERROR;
+        }
+        return ret;
+      }
 
-      //void BufferFileAppender::set_normal_flags_()
-      //{
-      //  open_flags_ = NORMAL_FLAGS;
-      //}
+      void BufferFileAppender::set_normal_flags_()
+      {
+        open_flags_ = NORMAL_FLAGS;
+      }
 
-      //void BufferFileAppender::add_truncate_flags_()
-      //{
-      //  open_flags_ |= TRUNC_FLAGS;
-      //}
+      void BufferFileAppender::add_truncate_flags_()
+      {
+        open_flags_ |= TRUNC_FLAGS;
+      }
 
-      //void BufferFileAppender::add_create_flags_()
-      //{
-      //  open_flags_ |= CREAT_FLAGS;
-      //}
+      void BufferFileAppender::add_create_flags_()
+      {
+        open_flags_ |= CREAT_FLAGS;
+      }
 
-      //void BufferFileAppender::add_excl_flags_()
-      //{
-      //  open_flags_ |= EXCL_FLAGS;
-      //}
+      void BufferFileAppender::add_excl_flags_()
+      {
+        open_flags_ |= EXCL_FLAGS;
+      }
 
-      //void BufferFileAppender::set_file_pos_(const int64_t file_pos)
-      //{
-      //  file_pos_ = file_pos;
-      //}
+      void BufferFileAppender::set_file_pos_(const int64_t file_pos)
+      {
+        file_pos_ = file_pos;
+      }
 
-      //int BufferFileAppender::get_open_flags() const
-      //{
-      //  return open_flags_;
-      //}
+      int BufferFileAppender::get_open_flags() const
+      {
+        return open_flags_;
+      }
 
-      //int BufferFileAppender::get_open_mode() const
-      //{
-      //  return OPEN_MODE;
-      //}
+      int BufferFileAppender::get_open_mode() const
+      {
+        return OPEN_MODE;
+      }
 
       ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -567,7 +564,8 @@ namespace oceanbase
                                                                         buffer_pos_(0),
                                                                         file_pos_(0),
                                                                         buffer_(NULL),
-                                                                        buffer_length_(0)
+                                                                        buffer_length_(0),
+                                                                        align_warn_(0)
       {
       }
 
@@ -584,7 +582,7 @@ namespace oceanbase
         }
       }
 
-      int DirectFileAppender::buffer_sync_()
+      int DirectFileAppender::buffer_sync_(bool *need_truncate)
       {
         int ret = OB_SUCCESS;
         if (NULL != buffer_
@@ -613,6 +611,10 @@ namespace oceanbase
           else
           {
             file_pos_ += buffer_length_;
+            if (NULL != need_truncate)
+            {
+              *need_truncate = (file_pos_ != (offset2write + size2write));
+            }
             buffer_length_ = 0;
             int64_t size2reserve = buffer_pos_ - lower_align(buffer_pos_, align_size_);
             if (0 != size2reserve)
@@ -632,14 +634,16 @@ namespace oceanbase
       int DirectFileAppender::fsync()
       {
         int ret = OB_SUCCESS;
+        bool need_truncate = false;
         if (-1 == fd_)
         {
           TBSYS_LOG(WARN, "file has not been open");
           ret = OB_ERROR;
         }
-        else if (OB_SUCCESS == (ret = buffer_sync_()))
+        else if (OB_SUCCESS == (ret = buffer_sync_(&need_truncate)))
         {
-          if (0 != ::ftruncate(fd_, file_pos_))
+          if (need_truncate
+              && 0 != ::ftruncate(fd_, file_pos_))
           {
             TBSYS_LOG(WARN, "ftruncate fail fd=%d file_pos=%ld errno=%u", fd_, file_pos_, errno);
             ret = OB_IO_ERROR;
@@ -676,6 +680,13 @@ namespace oceanbase
         }
         else
         {
+          if (0 == align_warn_
+              && 0 != count % align_size_)
+          {
+            align_warn_++;
+            TBSYS_LOG(WARN, "count=%ld do not match align_size=%ld", count, align_size_);
+          }
+
           bool buffer_synced = false;
           if (buffer_size_ < (buffer_pos_ + count))
           {
@@ -819,7 +830,24 @@ namespace oceanbase
       int64_t write_ret = 0;
       while (length2write > 0)
       {
-        write_ret = ::pwrite(fd, (char*)buf + offset2write, length2write, offset + offset2write);
+        for (int64_t retry = 0; retry < 3;)
+        {
+          write_ret = ::pwrite(fd, (char*)buf + offset2write, length2write, offset + offset2write);
+          if (0 >= write_ret)
+          {
+            if (errno == EINTR) // 阻塞IO不需要判断EAGAIN
+            {
+              continue;
+            }
+            TBSYS_LOG(ERROR, "pwrite fail ret=%ld fd=%d buf=%p size2write=%ld offset2write=%ld retry_num=%ld",
+                      write_ret, fd, (char*)buf + offset2write, length2write, offset + offset2write, retry);
+            retry++;
+          }
+          else
+          {
+            break;
+          }
+        }
         if (0 >= write_ret)
         {
           if (errno == EINTR) // 阻塞IO不需要判断EAGAIN
@@ -842,7 +870,24 @@ namespace oceanbase
       int64_t read_ret= 0;
       while (length2read > 0)
       {
-        read_ret = ::pread(fd, (char*)buf + offset2read, length2read, offset + offset2read);
+        for (int64_t retry = 0; retry < 3;)
+        {
+          read_ret = ::pread(fd, (char*)buf + offset2read, length2read, offset + offset2read);
+          if (0 > read_ret)
+          {
+            if (errno == EINTR) // 阻塞IO不需要判断EAGAIN
+            {
+              continue;
+            }
+            TBSYS_LOG(ERROR, "pread fail ret=%ld fd=%d buf=%p size2write=%ld offset2write=%ld retry_num=%ld",
+                      read_ret, fd, (char*)buf + offset2read, length2read, offset + offset2read);
+            retry++;
+          }
+          else
+          {
+            break;
+          }
+        }
         if (0 >= read_ret)
         {
           if (errno == EINTR) // 阻塞IO不需要判断EAGAIN
@@ -1311,8 +1356,8 @@ namespace oceanbase
         }
         else
         {
-          //file_ = new(std::nothrow) FileComponent::BufferFileAppender();
-          TBSYS_LOG(WARN, "do not support buffer io now fname=[%.*s]", fname.length(), fname.ptr());
+          file_ = new(std::nothrow) FileComponent::BufferFileAppender();
+          //TBSYS_LOG(WARN, "do not support buffer io now fname=[%.*s]", fname.length(), fname.ptr());
         }
       }
       if (NULL == file_)
@@ -1348,8 +1393,8 @@ namespace oceanbase
         }
         else
         {
-          //file_ = new(std::nothrow) FileComponent::BufferFileAppender();
-          TBSYS_LOG(WARN, "do not support buffer io now fname=[%.*s]", fname.length(), fname.ptr());
+          file_ = new(std::nothrow) FileComponent::BufferFileAppender();
+          //TBSYS_LOG(WARN, "do not support buffer io now fname=[%.*s]", fname.length(), fname.ptr());
         }
         if (NULL == file_)
         {

@@ -42,7 +42,6 @@ namespace oceanbase
         static const int64_t OP_NOP                   = 15;
         static const int64_t OP_ROW_EXIST             = 16;
 
-
         // serialize ext obj type
         static const int64_t BASIC_PARAM_FIELD        = 50;
         static const int64_t END_PARAM_FIELD          = 51;
@@ -57,11 +56,12 @@ namespace oceanbase
         static const int64_t TABLET_RANGE_FIELD       = 60;
         static const int64_t OBDB_SEMANTIC_FIELD      = 61;
         static const int64_t GROUPBY_PARAM_FIELD      = 62;
-        static const int64_t GROUPBY_GRO_COLUMN_FIELD        = 63;
-        static const int64_t GROUPBY_RET_COLUMN_FIELD        = 64;
-        static const int64_t GROUPBY_AGG_COLUMN_FIELD        = 65;
+        static const int64_t GROUPBY_GRO_COLUMN_FIELD = 63;
+        static const int64_t GROUPBY_RET_COLUMN_FIELD = 64;
+        static const int64_t GROUPBY_AGG_COLUMN_FIELD = 65;
         static const int64_t UPDATE_COND_PARAM_FIELD  = 66;
         static const int64_t UPDATE_COND_FIELD        = 67;
+        static const int64_t RESERVE_PARAM_FIELD      = 68;
     };
   } /* common */
 } /* oceanbase */

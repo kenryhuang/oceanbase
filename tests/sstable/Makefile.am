@@ -18,6 +18,10 @@ LDADD = $(top_builddir)/src/chunkserver/libchunkserver.a \
 
 AM_LDFLAGS = -lnuma -lpthread -lc -lm -lrt -lgtest -ldl ${GCOV_LIB} -laio
 CXXFLAGS = -D__STDC_LIMIT_MACROS -D__GNU_SOURCE -DCOMPATIBLE -g -Wall 
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_LIBRARIES = libtestdiskpath.a
 libtestdiskpath_a_SOURCES = test_disk_path.cpp
@@ -73,3 +77,5 @@ check_SCRIPTS = $(bin_PROGRAMS)
 TESTS = $(check_SCRIPTS) 
 
 CLEANFILES = $(check_SCRIPTS)
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

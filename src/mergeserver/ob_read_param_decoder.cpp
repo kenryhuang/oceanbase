@@ -457,18 +457,19 @@ namespace
         else
         {
           column_id = column_info->get_id();
-          int64_t column_idx_in_scan_param 
+          int64_t column_idx_in_scan_param
           = schema_assis_in.column_idx_in_org_param_[column_idx_in_schema_mgr];
           if (column_idx_in_scan_param >= decoded_param.get_column_id_size()
               || column_idx_in_scan_param < 0)
           {
-            TBSYS_LOG(WARN,"orderby column not in basic info [column_name:%.*s]", orderby_columns[i].length(),
-                      orderby_columns[i].ptr());
+            TBSYS_LOG(WARN,"orderby column not in basic info [table_name:%.*s, column_name:%.*s]",
+                      org_param.get_table_name().length(), org_param.get_table_name().ptr(),
+                      orderby_columns[i].length(), orderby_columns[i].ptr());
             err = OB_INVALID_ARGUMENT;
           }
           else
           {
-            err = decoded_param.add_orderby_column(column_idx_in_scan_param, 
+            err = decoded_param.add_orderby_column(column_idx_in_scan_param,
                                                    static_cast<ObScanParam::Order>(order_desc[i]));
             if (OB_SUCCESS != err)
             {

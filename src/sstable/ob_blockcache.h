@@ -103,7 +103,8 @@ namespace oceanbase
     {
       friend class ObBufferHandle;
       static const int64_t KVCACHE_ITEM_SIZE = 1 * 1024;      //1K
-      static const int64_t KVCACHE_BLOCK_SIZE = 1024 * 1024;  //1M
+      static const int64_t KVCACHE_BLOCK_SIZE = 1024 * 1024L;  //1M
+      static const int64_t MAX_READ_AHEAD_SIZE = 1024 * 1024L;  //1M
 
     public:
       typedef common::KeyValueCache<ObDataIndexKey, BlockCacheValue, 
@@ -140,6 +141,31 @@ namespace oceanbase
                         const int64_t nbyte,
                         ObBufferHandle& buffer_handle,
                         const uint64_t table_id);
+
+      /**
+       * first try to get block data at %cursor from cache,
+       * if cache missed, then read continuous blocks in 
+       * %block_infos as one piece to save i/o count.
+       *
+       * @param sstable_id sstable id of sstable file to read
+       * @param table_id  for Stat.
+       * @param block_infos block position info (offset,size) array.
+       * @param cursor index of block_infos get from cache
+       * @param is_reverse read ahead blocks direction if true means
+       *                   from down to top.
+       * @param buffer_handle store the return block data buffer, and 
+       *                      it will revert buffer handle automaticly
+       *
+       * @return int32_t if success, return the read block data size, 
+       *         else return -1
+       */
+      int32_t get_block_readahead(
+          const uint64_t sstable_id,
+          const uint64_t table_id,
+          const ObBlockPositionInfos &block_infos,
+          const int64_t cursor, 
+          const bool is_reverse, 
+          ObBufferHandle &buffer_handle);
 
       /**
        * try to get block data from cache, if success, return the 

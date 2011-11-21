@@ -59,6 +59,8 @@ namespace oceanbase
     {
       public:
         virtual ~ITableIterator() {};
+      public:
+        virtual bool is_multi_update() = 0;
     };
 
     class MemTableEntityIterator : public ITableIterator
@@ -70,10 +72,19 @@ namespace oceanbase
         virtual int next_cell();
         virtual int get_cell(common::ObCellInfo **cell_info);
         virtual int get_cell(common::ObCellInfo **cell_info, bool *is_row_changed);
+        virtual bool is_multi_update()
+        {
+          return is_multi_update_;
+        };
+        void set_multi_update(const bool is_multi_update)
+        {
+          is_multi_update_ = is_multi_update;
+        };
         void reset();
         MemTableIterator &get_memtable_iter();
       private:
         MemTableIterator memtable_iter_;
+        bool is_multi_update_;
     };
 
     class SSTableEntityIterator : public ITableIterator
@@ -85,6 +96,10 @@ namespace oceanbase
         virtual int next_cell();
         virtual int get_cell(common::ObCellInfo **cell_info);
         virtual int get_cell(common::ObCellInfo **cell_info, bool *is_row_changed);
+        virtual bool is_multi_update()
+        {
+          return false;
+        };
         void reset();
         inline common::ObGetParam &get_get_param();
         void set_sstable_iter(common::ObIterator *sstable_iter);
@@ -272,7 +287,7 @@ namespace oceanbase
         TableItem();
         ~TableItem();
       public:
-        ITableEntity *get_table_entity();
+        ITableEntity *get_table_entity(int64_t &sstable_percent);
         MemTable &get_memtable();
         int init_sstable_meta();
         Stat get_stat() const;
@@ -280,6 +295,7 @@ namespace oceanbase
         uint64_t get_sstable_id() const;
         void set_sstable_id(const uint64_t sstable_id);
         int64_t get_time_stamp() const;
+        int64_t get_sstable_loaded_time() const;
         int do_freeze(const uint64_t clog_id, const int64_t time_stamp);
         int do_dump();
         int do_drop();
@@ -298,6 +314,7 @@ namespace oceanbase
         uint64_t clog_id_;
         MemTableRowIterator row_iter_;
         int64_t time_stamp_;
+        int64_t sstable_loaded_time_;
     };
 
     typedef common::ObList<ITableEntity*> TableList;
@@ -400,9 +417,12 @@ namespace oceanbase
         int clear_active_memtable();
 
         virtual int64_t get_extern_mem_total();
+
+        void set_warm_up_percent(const int64_t warm_up_percent);
       private:
         TableItem *freeze_active_(const uint64_t new_version);
         void revert_memtable_(TableItem *table_item);
+        int64_t get_warm_up_percent_();
       private:
         bool inited_;
         bool sstable_scan_finished_;
@@ -420,6 +440,8 @@ namespace oceanbase
         int64_t last_major_freeze_time_;
 
         MemTableAttr memtable_attr_;
+
+        int64_t cur_warm_up_percent_;
     };
 
     extern void thread_read_prepare();

@@ -15,6 +15,10 @@ LDADD = $(top_builddir)/src/chunkserver/libchunkserver.a\
 
 AM_LDFLAGS=-lpthread -lc -lm -lrt ${GCOV_LIB} -ldl -laio -lnuma
 CXXFLAGS=-D__STDC_LIMIT_MACROS -g -Wall -D__UNIT_TEST__ -D_BTREE_ENGINE_
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_PROGRAMS = multi_write total_scan random_read
 

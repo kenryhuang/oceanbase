@@ -69,10 +69,23 @@ namespace oceanbase
       void set_is_result_cached(const bool cached);
       bool get_is_result_cached()const;
       
-      void reset(void); 
+      void set_is_read_consistency(const bool cons);
+      bool get_is_read_consistency()const;
 
+      void reset(void);
+      
+      /// serailize or deserialization
+      NEED_SERIALIZE_AND_DESERIALIZE;
+    
+    protected:
+      // RESERVE_PARAM_FIELD
+      int serialize_reserve_param(char * buf, const int64_t buf_len, int64_t & pos) const;
+      int deserialize_reserve_param(const char * buf, const int64_t data_len, int64_t & pos);
+      int64_t get_reserve_param_serialize_size(void) const;
+    
     private:
-      bool is_result_cached_;
+      int8_t is_read_master_;
+      int8_t is_result_cached_;
       ObVersionRange version_range_;
     };
   } /* common */

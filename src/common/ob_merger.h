@@ -24,7 +24,7 @@ namespace oceanbase
   namespace common
   {
     // ObMerger is used to merge multi iterator and get cell info row by row.
-    class ObMerger
+    class ObMerger : public ObIterator
     {
       public:
         ObMerger(bool is_asc = true);
@@ -42,6 +42,10 @@ namespace oceanbase
       public:
         int next_cell();
         int get_cell(ObCellInfo** cell, bool* is_row_changed);
+        int get_cell(ObCellInfo** cell)
+        {
+          return this->get_cell(cell, NULL);
+        };
 
       private:
         int find_next_row_();

@@ -48,9 +48,13 @@ ObSlaveMgr::~ObSlaveMgr()
   }
 }
 
-int ObSlaveMgr::init(const uint32_t vip, ObCommonRpcStub *rpc_stub, int64_t log_sync_timeout,
-    int64_t lease_interval, int64_t lease_reserved_time,
-    int64_t send_retry_times/* = DEFAULT_SEND_LOG_RETRY_TIMES*/)
+int ObSlaveMgr::init(const uint32_t vip,
+                     ObCommonRpcStub *rpc_stub,
+                     int64_t log_sync_timeout,
+                     int64_t lease_interval,
+                     int64_t lease_reserved_time,
+                     int64_t send_retry_times/* = DEFAULT_SEND_LOG_RETRY_TIMES*/,
+                     bool exist_wait_lease_on/* = false*/)
 {
   int ret = OB_SUCCESS;
 
@@ -75,6 +79,7 @@ int ObSlaveMgr::init(const uint32_t vip, ObCommonRpcStub *rpc_stub, int64_t log_
     lease_interval_ = lease_interval;
     lease_reserved_time_ = lease_reserved_time;
     send_retry_times_ = send_retry_times;
+    slave_fail_wait_lease_on_ = exist_wait_lease_on;
     is_initialized_ = true;
   }
 
@@ -254,9 +259,12 @@ int ObSlaveMgr::send_data(const char* data, int64_t length)
     while (p != NULL && p != &failed_head.server_list_link)
     {
       slave_node = (ServerNode*)(p);
-      while (slave_node->is_lease_valid(MASTER_LEASE_CHECK_REDUNDANCE))
-      {
-        usleep(CHECK_LEASE_VALID_INTERVAL);
+      if (slave_fail_wait_lease_on_)
+      { // wait slave lease timeout when switch is on
+        while (slave_node->is_lease_valid(MASTER_LEASE_CHECK_REDUNDANCE))
+        {
+          usleep(CHECK_LEASE_VALID_INTERVAL);
+        }
       }
 
       char addr_buf[BUFSIZ];
@@ -264,7 +272,15 @@ int ObSlaveMgr::send_data(const char* data, int64_t length)
       {
         strcpy(addr_buf, "Get Server IP failed");
       }
-      TBSYS_LOG(WARN, "Slave[%s]'s lease is expired and has been removed", addr_buf);
+      if (slave_fail_wait_lease_on_)
+      {
+        TBSYS_LOG(WARN, "Slave[%s]'s lease is expired and has been removed", addr_buf);
+      }
+      else
+      {
+        TBSYS_LOG(WARN, "Slave[%s] has been removed without "
+                        "waiting lease timeout", addr_buf);
+      }
 
       p = p->next();
       p->prev()->remove();

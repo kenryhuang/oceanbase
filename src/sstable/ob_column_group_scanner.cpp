@@ -43,20 +43,49 @@ namespace oceanbase
     {
     }
 
+    int ObColumnGroupScanner::check_status() const
+    {
+      int iret = OB_SUCCESS;
+      if (is_forward_status())
+      {
+        iret = OB_SUCCESS;
+      }
+      else if (ITERATE_NOT_INITIALIZED == iterate_status_)
+      {
+        iret = OB_NOT_INIT;
+      }
+      else if (ITERATE_NOT_START == iterate_status_)
+      {
+        iret = OB_NOT_INIT;
+      }
+      else if (ITERATE_END == iterate_status_)
+      {
+        iret = OB_ITER_END;
+      }
+      else
+      {
+        iret = OB_ERROR;
+      }
+
+      return iret;
+    }
+
     int ObColumnGroupScanner::next_cell()
     {
-      int iret = has_next_cell() ? OB_SUCCESS : OB_ITER_END;
+      int iret = check_status();
 
       if (OB_SUCCESS == iret)
       {
         iret = scanner_.next_cell();
         do
         {
+
           // if reach end of current block, skip to next
           // fetch_next_block return OB_SUCCESS means still has block(s) 
           // or OB_ITER_END means reach the end of this scan(%scan_param.end_key).
           if (OB_BEYOND_THE_RANGE == iret 
-              && (OB_SUCCESS == (iret = fetch_next_block())) )
+              && (OB_SUCCESS == (iret = fetch_next_block())) 
+              && is_forward_status() )
           {
             // got block(s) ahead, continue iterate block data.
             // current block may contains valid keys(dense format), 
@@ -68,6 +97,8 @@ namespace oceanbase
         } while (OB_BEYOND_THE_RANGE == iret);
       }
 
+      iret = check_status();
+
       if (OB_UNLIKELY(OB_SUCCESS != iret && OB_ITER_END != iret))
       {
         TBSYS_LOG(ERROR, "next cell error iret=%d, group=%ld, table=%ld,"
@@ -76,6 +107,7 @@ namespace oceanbase
             sstable_reader_->get_sstable_id().sstable_file_id_,
             index_array_cursor_, index_array_.block_count_, iterate_status_);
       }
+
 
       return iret;
     }
@@ -94,17 +126,17 @@ namespace oceanbase
         *cell = NULL;
       }
 
-      if (NULL == cell)
+      if (OB_UNLIKELY(NULL == cell))
       {
         TBSYS_LOG(ERROR, "invalid arguments, cell=%p.", cell);
         ret = OB_INVALID_ARGUMENT;
       }
-      else if (ITERATE_NOT_START == iterate_status_ ) 
+      else if (OB_UNLIKELY(ITERATE_NOT_START == iterate_status_) ) 
       {
         TBSYS_LOG(ERROR, "iterate not start.");
         ret = OB_NOT_INIT;
       }
-      else if (ITERATE_IN_ERROR == iterate_status_)
+      else if (OB_UNLIKELY(ITERATE_IN_ERROR == iterate_status_))
       {
         TBSYS_LOG(ERROR, "iterate in error.");
         ret = OB_ERROR;
@@ -152,7 +184,14 @@ namespace oceanbase
 
       if (is_valid_cursor())
       {
-        bret = index_array_cursor_ >= index_array_.block_count_;
+        if (scan_param_->is_reverse_scan())
+        {
+          bret = index_array_cursor_ < 0;
+        }
+        else
+        {
+          bret = index_array_cursor_ >= index_array_.block_count_;
+        }
       }
 
       return bret;
@@ -206,8 +245,6 @@ namespace oceanbase
             else
             {
               iret = current_scan_column_indexes_.add_column_id(i, def->column_name_id_);
-              TBSYS_LOG(DEBUG, "add column index=%ld, id =%d, group=%ld", 
-                  i, def->column_name_id_, group_id);
             }
           }
         }
@@ -246,8 +283,6 @@ namespace oceanbase
                   table_id, group_id, current_column_id)) >= 0 )
           {
             iret = current_scan_column_indexes_.add_column_id(index, current_column_id);
-            TBSYS_LOG(DEBUG, "add column index=%ld, id =%ld, group=%ld", 
-                index, current_column_id, group_id);
           }
         }
       }
@@ -258,8 +293,27 @@ namespace oceanbase
             "sstable id=%ld, table id=%ld, group id =%ld, group seq=%ld",
             iret, sstable_file_id, table_id, group_id, group_seq);
       }
+      else
+      {
+        TBSYS_LOG(DEBUG, "trans input param succeed,sstable id=%ld, "
+            "table id=%ld, group id =%ld, group seq=%ld, column count=%ld",
+             sstable_file_id, table_id, group_id, group_seq, 
+             current_scan_column_indexes_.get_column_count());
+      }
 
       return iret;
+    }
+
+    void ObColumnGroupScanner::advance_to_next_block()
+    {
+      if (scan_param_->is_reverse_scan())
+      {
+        --index_array_cursor_;
+      }
+      else
+      {
+        ++index_array_cursor_;
+      }
     }
 
     void ObColumnGroupScanner::reset_block_index_array()
@@ -285,37 +339,29 @@ namespace oceanbase
       bool is_result_cached = scan_param_->get_is_result_cached();
 
       // reset cursor and state
-      index_array_cursor_ = 0;
+      if (scan_param_->is_reverse_scan())
+      {
+        index_array_cursor_ = index_array_.block_count_ - 1;
+      }
+      else
+      {
+        index_array_cursor_ = 0;
+      }
+
       iterate_status_ = ITERATE_IN_PROGRESS;
 
       if (!scan_param_->is_sync_read())
       {
-        if (scan_param_->is_reverse_scan())
-        {
-          ObBlockPositionInfos *asc_order_index_array = 
-            reinterpret_cast<ObBlockPositionInfos*>(uncompressed_data_buffer_);
-          // reverse index_array_
-          int count = 0;
-          for (int64_t i = index_array_.block_count_ - 1; i >= 0; --i)
-          {
-            asc_order_index_array->position_info_[count++] 
-              = index_array_.position_info_[i];
-          }
-          asc_order_index_array->block_count_ = count;
-          iret = block_cache_->advise( sstable_file_id, 
-              *asc_order_index_array, table_id, group_id_, is_result_cached, true);
-        }
-        else
-        {
-          iret = block_cache_->advise( sstable_file_id, 
-              index_array_, table_id, group_id_, is_result_cached, false);
-        }
+        iret = block_cache_->advise( sstable_file_id, 
+            index_array_, table_id, group_id_, is_result_cached, 
+            scan_param_->is_reverse_scan());
       }
 
       return iret;
     }
 
-    int ObColumnGroupScanner::get_first_batch_block_index()
+
+    int ObColumnGroupScanner::search_block_index(const bool first_time)
     {
       int iret = OB_SUCCESS;
 
@@ -327,34 +373,69 @@ namespace oceanbase
       info.offset_ = trailer.get_block_index_record_offset();
       info.size_   = trailer.get_block_index_record_size();
 
-
-      // reset block index array for query start block index
-      reset_block_index_array();
-
-      iret = block_index_cache_->get_block_position_info(
-          info, scan_param_->get_table_id(), group_id_, 
-          scan_param_->get_range(), scan_param_->is_reverse_scan(), index_array_); 
-
-      if (OB_BEYOND_THE_RANGE == iret)
+      int64_t end_offset = 0;
+      SearchMode mode = OB_SEARCH_MODE_LESS_THAN;
+      if (!first_time)
       {
-        iret = OB_ITER_END;
-        iterate_status_ = ITERATE_END;
+        if (!is_end_of_block() && index_array_.block_count_ <= 0)
+        {
+          TBSYS_LOG(ERROR, "cursor=%ld, block count=%ld error, cannot search next batch blocks.", 
+              index_array_cursor_, index_array_.block_count_);
+          iret = OB_ERROR;
+        }
+        else if (scan_param_->is_reverse_scan())
+        {
+          end_offset = index_array_.position_info_[0].offset_;
+          mode = OB_SEARCH_MODE_LESS_THAN;
+        }
+        else
+        {
+          end_offset = index_array_.position_info_[index_array_.block_count_ - 1].offset_;
+          mode = OB_SEARCH_MODE_GREATER_THAN;
+        }
       }
-      else if (OB_SUCCESS != iret)
+
+      if (OB_SUCCESS == iret)
       {
-        TBSYS_LOG(ERROR, "search block index error, iret=%d, info=%ld,%ld,%ld,"
-            " table id=%ld,group id=%ld, index_array.block_count=%ld",
-            iret, info.sstable_file_id_, info.offset_, info.size_,  
-            scan_param_->get_table_id(), group_id_, index_array_.block_count_);
+        reset_block_index_array();
+
+        if (first_time)
+        {
+          iret = block_index_cache_->get_block_position_info(
+              info, scan_param_->get_table_id(), group_id_, 
+              scan_param_->get_range(), 
+              scan_param_->is_reverse_scan(), index_array_); 
+        }
+        else
+        {
+          iret = block_index_cache_->next_offset(
+              info, scan_param_->get_table_id(), group_id_, 
+              end_offset, mode, index_array_);
+        }
       }
-      else
+
+      if (OB_SUCCESS == iret)
       {
+        iret = prepare_read_blocks();
         TBSYS_LOG(DEBUG, "search block index succeed, sstable_file_id: %ld, "
             "total block count: %ld, index offset: %ld, index size: %ld, "
             "query need block count=%ld",
             info.sstable_file_id_, trailer.get_block_count(), 
             info.offset_, info.size_, index_array_.block_count_);
-
+      }
+      else if (OB_BEYOND_THE_RANGE == iret)
+      {
+        TBSYS_LOG(DEBUG, "search block index out of range.");
+        iterate_status_ = ITERATE_END;
+        iret = OB_SUCCESS;
+      }
+      else if (OB_SUCCESS != iret)
+      {
+        iterate_status_ = ITERATE_IN_ERROR;
+        TBSYS_LOG(ERROR, "search block index error, iret=%d, info=%ld,%ld,%ld,"
+            " table id=%ld,group id=%ld, index_array.block_count=%ld",
+            iret, info.sstable_file_id_, info.offset_, info.size_,  
+            scan_param_->get_table_id(), group_id_, index_array_.block_count_);
       }
 
       return iret;
@@ -399,6 +480,7 @@ namespace oceanbase
         block_cache_ = block_cache;
 
         iterate_status_ = ITERATE_NOT_START;
+        index_array_.block_count_ = 0;
       }
 
       return ret;
@@ -411,6 +493,7 @@ namespace oceanbase
         const ObSSTableReader* const sstable_reader)
     {
       int iret = OB_SUCCESS;
+      char range_buf[OB_RANGE_STR_BUFSIZ];
 
       if (NULL == scan_param || NULL == sstable_reader || !scan_param->is_valid())
       {
@@ -435,115 +518,40 @@ namespace oceanbase
         group_id_ = group_id;
         group_seq_ = group_seq;
 
-        if ( OB_SUCCESS != (iret = get_first_batch_block_index()) )
+        scan_param_->get_range().to_string(range_buf, OB_RANGE_STR_BUFSIZ);
+        TBSYS_LOG(DEBUG, "begin to scan ,  table id=%ld, group id=%ld, "
+            "sstable id=%ld, input range:%s, iterate_status_=%ld, "
+            "scan param::is reverse=%d, result cache:%d, read mode:%d", 
+            scan_param_->get_table_id(), group_id_, 
+            sstable_reader_->get_sstable_id().sstable_file_id_, range_buf, 
+            iterate_status_, scan_param_->is_reverse_scan(), 
+            scan_param_->get_is_result_cached(), scan_param_->get_read_mode());
+
+        if ( OB_SUCCESS != (iret = search_block_index(true)) )
         {
-          if (OB_ITER_END == iret)
-          {
-            iret = OB_SUCCESS;
-            TBSYS_LOG(DEBUG, "search block index out of range at first time.");
-          }
-          else
-          {
-            iterate_status_ = ITERATE_IN_ERROR;
-            TBSYS_LOG(ERROR, "search in block index error, iret:%d.", iret);
-          }
-        }
-        else if ( OB_SUCCESS != (iret = prepare_read_blocks()) )
-        {
-          TBSYS_LOG(ERROR, "prepare read blocks, iret:%d, block count=%ld", 
-              iret, index_array_.block_count_);
+          TBSYS_LOG(ERROR, "search in block index error, iret:%d.", iret);
         }
         else if ( OB_SUCCESS != (iret = fetch_next_block()) )
         {
-          if (OB_ITER_END == iret || OB_BEYOND_THE_RANGE == iret)
-          {
-            iret = OB_SUCCESS;
-            TBSYS_LOG(DEBUG, "out of range, in first fetch_next_block , "
-                "iret=%d, sstable id=%ld", iret, 
-                sstable_reader_->get_sstable_id().sstable_file_id_);
-          }
-          else if (OB_SUCCESS != iret)
-          {
-            TBSYS_LOG(ERROR, "error in first fetch_next_block, iret:%d", iret);
-          }
+          TBSYS_LOG(ERROR, "error in first fetch_next_block, iret:%d", iret);
         }
 
-      }
-
-      if (OB_SUCCESS != iret && NULL != scan_param_ && NULL != sstable_reader_)
-      {
-        char range_buf[OB_RANGE_STR_BUFSIZ];
-        scan_param_->get_range().to_string(range_buf, OB_RANGE_STR_BUFSIZ);
-        TBSYS_LOG(ERROR, "set scan param error, is reverse=%d, table id=%ld, group id=%ld, "
-            "sstable id=%ld, input range:%s, iterate_status_=%ld", 
-            scan_param_->is_reverse_scan(), scan_param_->get_table_id(), group_id_, 
-            sstable_reader_->get_sstable_id().sstable_file_id_, range_buf, iterate_status_);
       }
 
       return iret;
     }
 
-    /*
-     *  fetch next batch block position infos use block index search
-     *  @return OB_ITER_END if scan_param_.end_key_ out of range
-     */
-    int ObColumnGroupScanner::fetch_next_batch_block_position()
-    {
-      int iret = OB_SUCCESS;
 
-      ObBlockIndexPositionInfo info;
-      const ObSSTableTrailer& trailer = sstable_reader_->get_trailer();
-      info.sstable_file_id_ = sstable_reader_->get_sstable_id().sstable_file_id_;
-      info.offset_ = trailer.get_block_index_record_offset();
-      info.size_   = trailer.get_block_index_record_size();
-
-      // last block offset of previous batch of blocks.
-      if (index_array_.block_count_ > ObBlockPositionInfos::NUMBER_OF_BATCH_BLOCK_INFO)
-      {
-        iret = OB_SIZE_OVERFLOW;
-        TBSYS_LOG(ERROR, "block count = %ld > array size=%ld",
-            index_array_.block_count_, ObBlockPositionInfos::NUMBER_OF_BATCH_BLOCK_INFO);
-      }
-      else
-      {
-        int64_t end_offset = index_array_.position_info_[index_array_.block_count_ - 1].offset_;
-        SearchMode mode = scan_param_->is_reverse_scan() 
-          ? OB_SEARCH_MODE_LESS_THAN : OB_SEARCH_MODE_GREATER_THAN;
-
-        // fetch next batch of blocks
-        reset_block_index_array();
-        iret = block_index_cache_->next_offset(info, scan_param_->get_table_id(), 
-            group_id_, end_offset, mode, index_array_);
-
-        if (OB_SUCCESS == iret)
-        {
-          iret = prepare_read_blocks();
-        }
-        else if (iret == OB_BEYOND_THE_RANGE)
-        {
-          TBSYS_LOG(DEBUG, "end of the last block, stop looking forward.\n");
-          iret = OB_ITER_END;
-        }
-        else
-        {
-          TBSYS_LOG(ERROR, "search block index by offset failed, iret=%d,"
-              "file info=%ld,%ld,%ld,end_offset=%ld, mode=%d\n", 
-              iret, info.sstable_file_id_, info.offset_, info.size_, end_offset, mode);
-        }
-      }
-
-      return iret;
-    }
-
-    int ObColumnGroupScanner::get_block_data(const ObBlockPositionInfo &pos, 
-        const char* &sstable_block_data_ptr, int64_t &sstable_block_data_size)
+    int ObColumnGroupScanner::read_current_block_data( 
+        const char* &block_data_ptr, int64_t &block_data_size)
     {
 
       int iret = OB_SUCCESS;
       ObBufferHandle handler;
 
-      sstable_block_data_ptr = NULL;
-      sstable_block_data_size = pos.size_;
+      const ObBlockPositionInfo & pos = index_array_.position_info_[index_array_cursor_];
+      block_data_ptr = NULL;
+      block_data_size = pos.size_;
 
       const char* compressed_data_buffer = NULL;
       int64_t compressed_data_bufsiz = 0;
@@ -551,12 +559,14 @@ namespace oceanbase
       int64_t sstable_file_id = sstable_reader_->get_sstable_id().sstable_file_id_;
       int64_t table_id = scan_param_->get_table_id();
 
+
       if (OB_SUCCESS == iret)
       {
         if (scan_param_->is_sync_read())
         {
-          iret = block_cache_->get_block(sstable_file_id,
-              pos.offset_, pos.size_, handler, table_id);
+          iret = block_cache_->get_block_readahead(sstable_file_id,
+              table_id, index_array_, index_array_cursor_, 
+              scan_param_->is_reverse_scan(), handler);
         }
         else
         {
@@ -564,9 +574,9 @@ namespace oceanbase
               pos.offset_, pos.size_, handler, TIME_OUT_US, table_id, group_id_);
         }
 
-        if (iret > 0)
+        if (iret == pos.size_)
         {
-          sstable_block_data_ptr = handler.get_buffer();
+          block_data_ptr = handler.get_buffer();
           iret = OB_SUCCESS;
         }
         else
@@ -576,12 +586,13 @@ namespace oceanbase
         }
       }
 
+
       ObRecordHeader header;
       if (OB_SUCCESS == iret)
       {
         memset(&header, 0, sizeof(header));
         iret = ObRecordHeader::check_record(
-            sstable_block_data_ptr, sstable_block_data_size, 
+            block_data_ptr, block_data_size, 
             ObSSTableWriter::DATA_BLOCK_MAGIC, header, 
             compressed_data_buffer, compressed_data_bufsiz);
         if (OB_SUCCESS != iret)
@@ -621,8 +632,8 @@ namespace oceanbase
             }
             else
             {
-              sstable_block_data_ptr = uncompressed_data_buffer_;
-              sstable_block_data_size = real_size;
+              block_data_ptr = uncompressed_data_buffer_;
+              block_data_size = real_size;
             }
           }
           else
@@ -635,13 +646,14 @@ namespace oceanbase
         {
           // sstable block data is not compressed, copy block to uncompressed buffer.
           memcpy(uncompressed_data_buffer_, compressed_data_buffer, compressed_data_bufsiz);
-          sstable_block_data_ptr = uncompressed_data_buffer_;
+          block_data_ptr = uncompressed_data_buffer_;
         }
       }
 
+
       if (OB_SUCCESS != iret && NULL != sstable_reader_ && NULL != scan_param_)
       {
-        TBSYS_LOG(ERROR, "get_block_data error, input param:"
+        TBSYS_LOG(ERROR, "read_current_block_data error, input param:"
             "iret=%d, file id=%ld, table_id=%ld, pos=%ld,%ld", iret, 
             sstable_reader_->get_sstable_id().sstable_file_id_, 
             scan_param_->get_table_id(), pos.offset_, pos.size_);
@@ -650,53 +662,56 @@ namespace oceanbase
       return iret;
     }
 
-    int ObColumnGroupScanner::fetch_next_block() 
+    int ObColumnGroupScanner::fetch_next_block()
     {
-
-      int iret = has_next_cell() ? OB_SUCCESS : OB_ITER_END;
-      if (OB_SUCCESS == iret && is_end_of_block())
+      int iret = OB_SUCCESS;
+      do
       {
-        if (ITERATE_WILL_STOP == iterate_status_)
+        iret = load_current_block_and_advance();
+      }
+      while (OB_SUCCESS == iret && iterate_status_ == ITERATE_NEED_FORWARD) ;
+      return iret;
+    }
+
+    int ObColumnGroupScanner::load_current_block_and_advance() 
+    {
+      int iret = OB_SUCCESS;
+      if (OB_SUCCESS == iret && is_forward_status())
+      {
+        if (ITERATE_LAST_BLOCK == iterate_status_)
         {
-          TBSYS_LOG(DEBUG, "current batch block scan over and reach the end, "
-              "group=%ld, cursor=%ld", group_id_, index_array_cursor_);
-          // scan reach the end of block.
-          iret = OB_ITER_END;
+          // last block is the end, no need to looking forward.
+          iterate_status_ = ITERATE_END;
         }
-        else
+        else if (is_end_of_block())
         {
           TBSYS_LOG(DEBUG, "current batch block scan over, "
               "begin fetch next batch blocks, group=%ld, cursor=%ld", 
               group_id_, index_array_cursor_);
           // has more blocks ahead, go on.
-          iret = fetch_next_batch_block_position();
+          iret = search_block_index(false);
         }
       }
 
-      if (OB_SUCCESS == iret)
+      if (OB_SUCCESS == iret && is_forward_status())
       {
-        if (index_array_cursor_ >= index_array_.block_count_)
+        if (is_end_of_block())
         {
-          // maybe fetch_next_batch_block_position got nothing.
-          iret = OB_ITER_END;
+          // maybe search_block_index got nothing.
+          iterate_status_ = ITERATE_END;
         }
         else
         {
-          const char *sstable_block_data_ptr = NULL;
-          int64_t sstable_block_data_size = 0;
-          ObBlockPositionInfo pos = index_array_.position_info_[index_array_cursor_];
+          const char *block_data_ptr = NULL;
+          int64_t block_data_size = 0;
+          iret = read_current_block_data(block_data_ptr, block_data_size);
 
-          TBSYS_LOG(DEBUG, "scan current block, cursor=%ld,offset=%ld,size=%ld", 
-              index_array_cursor_, pos.offset_, pos.size_);
-
-          iret = get_block_data(pos, sstable_block_data_ptr, sstable_block_data_size);
-
-          if (OB_SUCCESS == iret && NULL != sstable_block_data_ptr && sstable_block_data_size > 0)
+          if (OB_SUCCESS == iret && NULL != block_data_ptr && block_data_size > 0)
           {
             bool need_looking_forward = false;
             ObSSTableBlockScanner::BlockData block_data(
                 block_internal_buffer_, block_internal_bufsiz_,
-                sstable_block_data_ptr, sstable_block_data_size, 
+                block_data_ptr, block_data_size, 
                 sstable_reader_->get_trailer().get_row_value_store_style());
 
             iret = scanner_.set_scan_param(scan_param_->get_range(), 
@@ -706,59 +721,49 @@ namespace oceanbase
             {
               // current block contains rowkey(s) we need, 
               // check current block is the end point?
-              ++index_array_cursor_;
-              iterate_status_ = need_looking_forward 
-                ? ITERATE_IN_PROGRESS : ITERATE_WILL_STOP;
+              advance_to_next_block();
+              iterate_status_ = need_looking_forward ? ITERATE_IN_PROGRESS : ITERATE_LAST_BLOCK;
             }
             else if (OB_BEYOND_THE_RANGE == iret)
             {
+              TBSYS_LOG(DEBUG, "current cursor = %ld, out of range, need_looking_forward=%d", 
+                  index_array_cursor_, need_looking_forward);
               // current block has no any rowkey we need, 
               // so check to continue search or not.
               if (!need_looking_forward)
               {
-                iret = OB_ITER_END;
+                iterate_status_ = ITERATE_END;
               }
               else
               {
-                ++index_array_cursor_;
-                iterate_status_ = need_looking_forward 
-                  ? ITERATE_IN_PROGRESS : ITERATE_WILL_STOP;
+                advance_to_next_block();
+                // current block is not we wanted, has no data in query range
+                // and either not the end of scan, set status to NEED_FORWARD 
+                // tell fetch_next_block call this function again.
+                // it happens only in reverse scan and query_range.end_key in 
+                // (prev_block.end_key < query_range.end_key < current_block.start_key)
+                iterate_status_ = ITERATE_NEED_FORWARD;
                 TBSYS_LOG(DEBUG, "current block has no data, but maybe in next block."
                     "it could happen when reverse search and endkey fall into the hole.");
               }
+              iret = OB_SUCCESS;
             }
             else
             {
               iterate_status_ = ITERATE_IN_ERROR;
               TBSYS_LOG(ERROR, "block scaner initialize error, iret=%d," 
-                  "block_data(sz=%ld,style=%d)", iret, sstable_block_data_size, 
+                  "block_data(sz=%ld,style=%d)", iret, block_data_size, 
                   sstable_reader_->get_trailer().get_row_value_store_style());  
             }
           }
           else
           {
-            TBSYS_LOG(ERROR, "get block data from cache failed, iret=%d, pos=%ld,%ld",
-                iret, pos.offset_, pos.size_);
+            iterate_status_ = ITERATE_IN_ERROR;
+            TBSYS_LOG(ERROR, "get current block data error, iret=%d, cursor_=%ld, block count=%ld,"
+                "is_reverse_scan=%d", iret, index_array_cursor_, index_array_.block_count_, 
+                scan_param_->is_reverse_scan());
           }
         }
-      }
-
-      // set iterate_status_ in case next call.
-      if (OB_ITER_END == iret) 
-      {
-        iterate_status_ = ITERATE_END;
-      }
-      else if (OB_BEYOND_THE_RANGE != iret && OB_SUCCESS != iret) 
-      {
-        iterate_status_ = ITERATE_IN_ERROR;
-      }
-
-      if (OB_SUCCESS != iret && OB_BEYOND_THE_RANGE != iret 
-          && OB_ITER_END != iret && NULL != scan_param_)
-      {
-        TBSYS_LOG(ERROR, "fetch next block error, iret=%d, cursor_=%ld, block count=%ld,"
-            "is_reverse_scan=%d", iret, index_array_cursor_, index_array_.block_count_, 
-            scan_param_->is_reverse_scan());
       }
 
       return iret;

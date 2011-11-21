@@ -198,7 +198,7 @@ int ObUpsLogMgr::replay_log(ObUpsTableMgr &table_mgr)
 
   if ((OB_SUCCESS == ret) && (!is_log_dir_empty_))
   {
-    ret = log_reader.init(log_dir_, replay_point_, false);
+    ret = log_reader.init(log_dir_, replay_point_, 0, false);
     if (OB_SUCCESS != ret)
     {
       TBSYS_LOG(ERROR, "ObLogReader init error[ret=%d], ObLogReplayRunnable init failed", ret);
@@ -298,15 +298,6 @@ int ObUpsLogMgr::replay_log(ObUpsTableMgr &table_mgr)
       {
         ret = OB_SUCCESS;
       }
-    }
-  }
-
-  if (OB_SUCCESS == ret)
-  {
-    ret = start_log(max_log_id_, get_cur_log_seq());
-    if (OB_SUCCESS != ret)
-    {
-      TBSYS_LOG(ERROR, "ObLogWriter start_log[max_log_id_=%lu get_cur_log_seq()=%lu", max_log_id_, get_cur_log_seq());
     }
   }
 

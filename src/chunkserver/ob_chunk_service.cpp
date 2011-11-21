@@ -44,7 +44,8 @@ namespace oceanbase
     ObChunkService::ObChunkService()
       : chunk_server_(NULL), inited_(false), 
       service_started_(false), in_register_process_(false), 
-      service_expired_time_(0), merge_delay_interval_(1),migrate_task_count_(0), lease_checker_(this),merge_task_(this)
+      service_expired_time_(0), merge_delay_interval_(1),migrate_task_count_(0), 
+      lease_checker_(this),merge_task_(this), fetch_ups_task_(this)
     {
     }
 
@@ -144,6 +145,11 @@ namespace oceanbase
       {
         //for the sake of simple,just update the stat per second
         rc = timer_.schedule(stat_updater_,1000000,true);
+      }
+
+      if (OB_SUCCESS == rc)
+      {
+        rc = timer_.schedule(fetch_ups_task_, chunk_server_->get_param().get_fetch_ups_interval(), false);
       }
       return rc;
     }
@@ -407,6 +413,9 @@ namespace oceanbase
           case OB_CS_START_GC:
             rc = cs_start_gc(version, channel_id, connection, in_buffer, out_buffer);
             break;
+          case OB_UPS_RELOAD_CONF:
+            rc = cs_reload_conf(version, channel_id, connection, in_buffer, out_buffer);
+            break;
           default:
             rc = OB_ERROR;
             break;
@@ -565,6 +574,11 @@ namespace oceanbase
         if (OB_SUCCESS != rc.result_code_)
         {
           TBSYS_LOG(ERROR, "parse cs_scan input scan param error.");
+        }
+        else
+        {
+          // force every client scan request use preread mode.
+          // scan_param_ptr->set_read_mode(ObScanParam::PREREAD);
         }
       }
 
@@ -750,18 +764,27 @@ namespace oceanbase
 
         if (OB_SUCCESS == rc.result_code_ && service_started_)
         {
+          int64_t wait_time = 0;
+          ObTabletManager &tablet_manager = chunk_server_->get_tablet_manager();
           if ( frozen_version > chunk_server_->get_tablet_manager().get_serving_data_version() )
           {
-            int64_t wait_time = 0;
-            if ( frozen_version  > merge_task_.get_last_frozen_version() )
+            if (frozen_version > merge_task_.get_last_frozen_version())
             {
-              TBSYS_LOG(INFO,"chunkserver received a new frozen version:%ld,last:%ld",frozen_version,
-                  merge_task_.get_last_frozen_version() );
+              TBSYS_LOG(INFO,"pending a new frozen version need merge:%ld,last:%ld",
+                  frozen_version, merge_task_.get_last_frozen_version() );
               merge_task_.set_frozen_version(frozen_version);
+            }
+            if (!merge_task_.is_scheduled() 
+                && tablet_manager.get_chunk_merge().can_launch_next_round(frozen_version))
+            {
               srand(tbsys::CTimeUtil::getTime());
               wait_time = random() % merge_delay_interval_;
+              // wait one more minute for ensure slave updateservers sync frozen version.
+              wait_time += chunk_server_->get_param().get_merge_delay_for_lsync();
+              TBSYS_LOG(INFO, "launch a new merge process after wait %ld us.", wait_time);
+              timer_.schedule(merge_task_, wait_time, false);  //async
+              merge_task_.set_scheduled();
             }
-            timer_.schedule(merge_task_, wait_time, false);  //async
           }
         }
       }
@@ -1224,24 +1247,26 @@ namespace oceanbase
 
       if( OB_SUCCESS == rc.result_code_ && false == keep_src)
       {
-        // remove tablet, need resave meta index file.
-        int32_t disk_no = -1;
-        rc.result_code_ = tablet_image.remove_tablet(range, tablet_version, disk_no);
-        if (OB_SUCCESS == rc.result_code_ && disk_no > 0)
+        // migrate/move , set local tablet merged, 
+        // will be discarded in next time merge process .
+        ObTablet *src_tablet = NULL;
+        rc.result_code_ = tablet_image.acquire_tablet(range,
+            ObMultiVersionTabletImage::SCAN_FORWARD, 0, src_tablet);
+        if (OB_SUCCESS == rc.result_code_ && NULL != src_tablet)
         {
-          rc.result_code_ = tablet_image.write(tablet_version, disk_no);
+          TBSYS_LOG(INFO, "src tablet set merged, version=%ld,disk=%d, range:",
+              src_tablet->get_data_version(), src_tablet->get_disk_no());
+          src_tablet->get_range().hex_dump(TBSYS_LOG_LEVEL_INFO);
+          src_tablet->set_merged();
+          tablet_image.write(
+              src_tablet->get_data_version(), src_tablet->get_disk_no());
         }
-        if (OB_SUCCESS == rc.result_code_ && num_file > 0)
+
+        if (NULL != src_tablet)
         {
-          for (int64_t i = 0; i < num_file; ++i)
-          {
-            const char* sstable_file_path = src_path[i];
-            if (FileDirectoryUtils::exists(sstable_file_path) && 0 != ::unlink(sstable_file_path))
-            {
-              TBSYS_LOG(INFO, "migrate over, remove local sstable = %s", sstable_file_path);
-            }
-          }
+          tablet_image.release_tablet(src_tablet);
         }
+
       }
 
       if ( NULL != src_path_buf )
@@ -1527,6 +1552,73 @@ namespace oceanbase
       return ret;
     }
 
+    int ObChunkService::cs_reload_conf(
+        const int32_t version,
+        const int32_t channel_id,
+        tbnet::Connection* connection, 
+        common::ObDataBuffer& in_buffer, 
+        common::ObDataBuffer& out_buffer)
+    {
+      int ret = OB_SUCCESS;
+      const int32_t CS_RELOAD_CONF_VERSION = 1;
+
+      ObString conf_file;
+      char config_file_str[OB_MAX_FILE_NAME_LENGTH];
+      common::ObResultCode rc;
+      rc.result_code_ = OB_SUCCESS;
+
+      if (version != CS_RELOAD_CONF_VERSION)
+      {
+        rc.result_code_ = OB_ERROR_FUNC_VERSION;
+      }
+      else
+      {
+        if ( OB_SUCCESS != (rc.result_code_ = 
+              conf_file.deserialize(in_buffer.get_data(), 
+                in_buffer.get_capacity(), in_buffer.get_position())))
+        {
+          TBSYS_LOG(WARN, "deserialize conf file error, ret=%d", ret);
+        }
+        else
+        {
+          int64_t length = conf_file.length();
+          strncpy(config_file_str, conf_file.ptr(), length);
+          config_file_str[length] = '\0';
+          TBSYS_LOG(INFO, "reload conf from file %s", config_file_str);
+        }
+      }
+
+      if (OB_SUCCESS == rc.result_code_)
+      {
+        if (OB_SUCCESS != (rc.result_code_ = 
+              chunk_server_->get_param().reload_from_config(config_file_str)))
+        {
+          TBSYS_LOG(WARN, "failed to reload config, ret=%d", ret);
+        }
+        else
+        {
+          chunk_server_->get_tablet_manager().get_chunk_merge().set_config_param();
+          chunk_server_->set_default_queue_size(chunk_server_->get_param().get_task_queue_size());
+          chunk_server_->set_min_left_time(chunk_server_->get_param().get_task_left_time());
+        }
+      }
+
+      ret = rc.serialize(out_buffer.get_data(),out_buffer.get_capacity(), out_buffer.get_position());
+      if (ret != OB_SUCCESS)
+      {
+        TBSYS_LOG(ERROR, "rc.serialize error");
+      }
+      else
+      {
+        chunk_server_->send_response(
+            OB_UPS_RELOAD_CONF_RESPONSE,
+            CS_RELOAD_CONF_VERSION,
+            out_buffer, connection, channel_id);
+      }
+
+      return ret;
+    }
+
     bool ObChunkService::is_valid_lease()
     {
       int64_t current_time = tbsys::CTimeUtil::getTime();
@@ -1616,20 +1708,11 @@ namespace oceanbase
       }
     }
 
-    int64_t ObChunkService::MergeTask::get_last_frozen_version() const
-    {
-      return frozen_version_;
-    }
-
-    void ObChunkService::MergeTask::set_frozen_version(int64_t version)
-    {
-      frozen_version_ = version;
-    }
-
     void ObChunkService::MergeTask::runTimerTask()
     {
       int err = OB_SUCCESS;
       ObTabletManager & tablet_manager = service_->chunk_server_->get_tablet_manager();
+      unset_scheduled();
 
       if (frozen_version_ <= 0)
       {
@@ -1641,7 +1724,7 @@ namespace oceanbase
             tablet_manager.get_serving_tablet_image().get_newest_version());
         kill(getpid(),2);
       }
-      else if (tablet_manager.can_launch_next_merge_round(frozen_version_))
+      else if (tablet_manager.get_chunk_merge().can_launch_next_round(frozen_version_))
       {
         err = tablet_manager.merge_tablets(frozen_version_);
         if (err != OB_SUCCESS)
@@ -1652,9 +1735,18 @@ namespace oceanbase
       }
       else
       {
-        tablet_manager.set_newest_frozen_version(frozen_version_);
+        tablet_manager.get_chunk_merge().set_newest_frozen_version(frozen_version_);
       }
     }
+
+    void ObChunkService::FetchUpsTask::runTimerTask()
+    {
+      ObTabletManager & tablet_manager = service_->chunk_server_->get_tablet_manager();
+      tablet_manager.get_chunk_merge().fetch_update_server_list();
+      // reschedule fetch updateserver list task with new interval.
+      service_->timer_.schedule(*this, service_->chunk_server_->get_param().get_fetch_ups_interval(), false);
+    }
+
   } // end namespace chunkserver
 } // end namespace oceanbase
 

@@ -66,6 +66,7 @@ namespace oceanbase
         const common::ObServer& get_root_server() const;
 
         const ObChunkServerParam & get_param() const ;
+        ObChunkServerParam & get_param() ;
         ObChunkServerStatManager & get_stat_manager();
         const ObTabletManager & get_tablet_manager() const ;
         ObTabletManager & get_tablet_manager() ;

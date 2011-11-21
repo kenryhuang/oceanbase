@@ -18,12 +18,37 @@
 #include "common/utility.h"
 #include "common/ob_log_dir_scanner.h"
 #include "common/ob_tsi_factory.h"
+#include "common/ob_log_cursor.h"
 #include "sstable/ob_aio_buffer_mgr.h"
 #include "ob_update_server.h"
 #include "ob_ups_utils.h"
 #include "ob_update_server_main.h"
-
 using namespace oceanbase::common;
+
+#define RPC_CALL_WITH_RETRY(function, retry_times, timeout, args...) \
+  ({ \
+    int err = OB_RESPONSE_TIME_OUT; \
+    for (int64_t i = 0; ObRoleMgr::STOP != role_mgr_.get_state() \
+        && ObRoleMgr::ERROR != role_mgr_.get_state() \
+        && OB_SUCCESS != err && i < retry_times; ++i) \
+    { \
+      int64_t timeu = tbsys::CTimeUtil::getMonotonicTime(); \
+      err = ups_rpc_stub_.function(args, timeout); \
+      TBSYS_LOG(INFO, "%s, retry_times=%ld, err=%d", #function, i, err); \
+      timeu = tbsys::CTimeUtil::getMonotonicTime() - timeu; \
+      if (OB_SUCCESS != err \
+          && timeu < timeout) \
+      { \
+        TBSYS_LOG(INFO, "timeu=%ld not match timeout=%ld, will sleep %ld", timeu, timeout, timeout - timeu); \
+        int sleep_ret = precise_sleep(timeout - timeu); \
+        if (OB_SUCCESS != sleep_ret) \
+        { \
+          TBSYS_LOG(ERROR, "precise_sleep ret=%d"); \
+        } \
+      } \
+    } \
+    err; \
+  })
 
 namespace oceanbase
 {
@@ -71,6 +96,32 @@ namespace oceanbase
       ups_master_.set_ipv4_addr(param_.get_ups_vip(), param_.get_ups_port());
 
       root_server_.set_ipv4_addr(param_.get_root_server_ip(), param_.get_root_server_port());
+
+      if (strlen(param_.get_ups_inst_master_ip()) > 0)
+      {
+        ups_inst_master_.set_ipv4_addr(param_.get_ups_inst_master_ip(), param_.get_ups_inst_master_port());
+        TBSYS_LOG(INFO, "UPS Instance Master is %s:%p", param_.get_ups_inst_master_ip(), param_.get_ups_inst_master_port());
+        obi_slave_stat_ = FOLLOWED_SLAVE;
+
+        char addr_buf[ADDR_BUF_LEN];
+        ups_inst_master_.to_string(addr_buf, sizeof(addr_buf));
+        addr_buf[ADDR_BUF_LEN - 1] = '\0';
+        TBSYS_LOG(INFO, "Slave stat set to FOLLOWED_SLAVE: ups_inst_master_=%s", addr_buf);
+      }
+      else if (strlen(param_.get_lsync_ip()) > 0)
+      {
+        lsync_server_.set_ipv4_addr(param_.get_lsync_ip(), param_.get_lsync_port());
+        obi_slave_stat_ = STANDALONE_SLAVE;
+
+        char addr_buf[ADDR_BUF_LEN];
+        lsync_server_.to_string(addr_buf, sizeof(addr_buf));
+        addr_buf[ADDR_BUF_LEN - 1] = '\0';
+        TBSYS_LOG(INFO, "Slave stat set to STANDALONE_SLAVE, lsync_server=%s", addr_buf);
+      }
+      else
+      {
+        obi_slave_stat_ = UNKNOWN_SLAVE;
+      }
 
       if (OB_SUCCESS == err)
       {
@@ -124,9 +175,14 @@ namespace oceanbase
       // init slave_mgr
       if (OB_SUCCESS == err)
       {
-        err = slave_mgr_.init(vip, &ups_rpc_stub_, param_.get_log_sync_timeout_us(),
-            param_.get_lease_interval_us(), param_.get_lease_reserved_time_us(),
-            param_.get_log_sync_retry_times());
+        err = slave_mgr_.init(
+                  vip,
+                  &ups_rpc_stub_,
+                  param_.get_log_sync_timeout_us(),
+                  param_.get_lease_interval_us(),
+                  param_.get_lease_reserved_time_us(),
+                  param_.get_log_sync_retry_times(),
+                  param_.get_slave_fail_wait_lease_on() != 0);
         if (OB_SUCCESS != err)
         {
           TBSYS_LOG(WARN, "failed to init slave mgr, err=%d", err);
@@ -201,12 +257,21 @@ namespace oceanbase
         int64_t read_thread_count = param_.get_read_thread_count();
         log_thread_queue_.setThreadParameter(1, this, NULL);
         read_thread_queue_.setThreadParameter(read_thread_count, this, NULL);
-        read_thread_queue_.setWaitTime(param_.get_high_priv_wait_time_us() / 1000L);
+        //read_thread_queue_.setWaitTime(param_.get_high_priv_wait_time_us() / 1000L);
         write_thread_queue_.setThreadParameter(1, this, NULL);
         lease_thread_queue_.setThreadParameter(1, this, NULL);
         store_thread_.setThreadParameter(1, this, NULL);
 
         is_first_log_ = true;
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = timer_.init();
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(ERROR, "ObTimer init error, err=%d", err);
+        }
       }
 
       return err;
@@ -229,59 +294,145 @@ namespace oceanbase
 
     void ObUpdateServer::cleanup()
     {
-      if (ObRoleMgr::SLAVE == role_mgr_.get_role())
+      /// 写线程
+      write_thread_queue_.stop();
+
+      /// 读线程
+      read_thread_queue_.stop();
+
+      /// Lease线程
+      lease_thread_queue_.stop();
+
+      /// Check线程
+      check_thread_.stop();
+
+      /// 转储线程
+      store_thread_.stop();
+
+
+      /// 写线程
+      write_thread_queue_.wait();
+
+      /// 读线程
+      read_thread_queue_.wait();
+
+      /// Lease线程
+      lease_thread_queue_.wait();
+
+      /// Check线程
+      check_thread_.wait();
+
+      /// 转储线程
+      store_thread_.wait();
+
+
+      if (ObiRole::SLAVE == obi_role_.get_role() || ObRoleMgr::SLAVE == role_mgr_.get_role())
       {
-        read_thread_queue_.stop();
-        log_thread_queue_.stop(true);
+        /// 抓取日志线程
         fetch_thread_.stop();
+
+        /// 日志回放线程
         log_replay_thread_.stop();
-        check_thread_.stop();
-        store_thread_.stop();
-        read_thread_queue_.wait();
-        log_thread_queue_.wait();
+
+        /// 抓取日志线程
         fetch_thread_.wait();
+
+        /// 日志回放线程
         log_replay_thread_.wait();
-        check_thread_.wait();
-        store_thread_.wait();
       }
-      else
-      {
-        read_thread_queue_.stop();
-        write_thread_queue_.stop();
-        lease_thread_queue_.stop();
-        check_thread_.stop();
-        store_thread_.stop();
-        read_thread_queue_.wait();
-        write_thread_queue_.wait();
-        lease_thread_queue_.wait();
-        check_thread_.wait();
-        store_thread_.wait();
-      }
+
+      timer_.destroy();
+      transport_.stop();
+      transport_.wait();
     }
 
     int ObUpdateServer::start_service()
     {
       int err = OB_SUCCESS;
 
-      ObRoleMgr::Role role = role_mgr_.get_role();
+      err = start_threads();
 
-      if (ObRoleMgr::MASTER == role)
+      if (OB_SUCCESS == err)
       {
-        err = start_master_();
+        RPC_CALL_WITH_RETRY(get_obi_role, INT64_MAX, DEFAULT_NETWORK_TIMEOUT, root_server_, obi_role_);
+
+        if (obi_role_.get_role() == ObiRole::INIT)
+        {
+          TBSYS_LOG(INFO, "get_obi_role=INIT, waiting for new obi role");
+          while (OB_SUCCESS == err
+              && obi_role_.get_role() == ObiRole::INIT
+              && ObRoleMgr::STOP != role_mgr_.get_state()
+              && ObRoleMgr::ERROR != role_mgr_.get_state())
+          {
+            usleep(DEFAULT_GET_OBI_ROLE_INTERVAL);
+            RPC_CALL_WITH_RETRY(get_obi_role, INT64_MAX, DEFAULT_NETWORK_TIMEOUT, root_server_, obi_role_);
+          }
+        }
+
+        if (ObRoleMgr::STOP == role_mgr_.get_state()
+            || ObRoleMgr::ERROR == role_mgr_.get_state())
+        {
+          err = OB_ERROR;
+        }
+        else
+        {
+          TBSYS_LOG(INFO, "obi_role=%s", obi_role_.get_role() == ObiRole::MASTER ? "MASTER" : "SLAVE");
+        }
       }
-      else if (ObRoleMgr::SLAVE == role)
+
+      if (OB_SUCCESS == err)
       {
-        err = start_slave_();
+        ObRoleMgr::Role role = role_mgr_.get_role();
+
+        if (ObiRole::MASTER == obi_role_.get_role())
+        {
+          if (ObRoleMgr::MASTER == role)
+          {
+            err = start_master_master_();
+          }
+          else if (ObRoleMgr::SLAVE == role)
+          {
+            err = start_master_slave_();
+          }
+          else if (ObRoleMgr::STANDALONE == role)
+          {
+            err = start_standalone_();
+          }
+          else
+          {
+            TBSYS_LOG(WARN, "invalid ObRoleMgr role, role=%d", role);
+            err = OB_ERROR;
+          }
+        }
+        else if(ObiRole::SLAVE == obi_role_.get_role())
+        {
+          if (ObRoleMgr::MASTER == role)
+          {
+            err = start_slave_master_();
+          }
+          else if (ObRoleMgr::SLAVE == role)
+          {
+            err = start_slave_slave_();
+          }
+          else if (ObRoleMgr::STANDALONE == role)
+          {
+            err = start_standalone_();
+          }
+          else
+          {
+            TBSYS_LOG(WARN, "invalid ObRoleMgr role, role=%d", role);
+            err = OB_ERROR;
+          }
+        }
+        else
+        {
+          TBSYS_LOG(WARN, "invalid ObiRole role, role=%d", obi_role_.get_role());
+          err = OB_ERROR;
+        }
       }
-      else if (ObRoleMgr::STANDALONE == role)
-      {
-        err = start_standalone_();
-      }
-      else
-      {
-        TBSYS_LOG(WARN, "invalid role, role=%d", role);
-        err = OB_ERROR;
-      }
+
+      cleanup();
+      TBSYS_LOG(INFO, "server stoped.");
 
       return err;
     }
@@ -305,20 +456,35 @@ namespace oceanbase
       }
     }
 
-    int ObUpdateServer::start_master_()
+    int ObUpdateServer::start_threads()
+    {
+      int ret = OB_SUCCESS;
+
+      /// 写线程
+      write_thread_queue_.start();
+
+      /// 读线程
+      read_thread_queue_.start();
+
+      /// Lease线程
+      lease_thread_queue_.start();
+
+      /// Check线程
+      check_thread_.start();
+
+      /// 转储线程
+      store_thread_.start();
+
+      return ret;
+    }
+
+    int ObUpdateServer::start_master_master_()
     {
       int err = OB_SUCCESS;
 
-      store_thread_.start();
-
       if (OB_SUCCESS == err)
       {
-        // fetch schema
-        if (!table_mgr_.get_schema_mgr().has_schema())
-        {
-          bool write_log = false;
-          err = update_schema(true, write_log);
-        }
+        err = set_schema();
       }
 
       if (OB_SUCCESS == err)
@@ -342,15 +508,25 @@ namespace oceanbase
 
           if (OB_SUCCESS == err)
           {
-            // replay log
-            err = log_mgr_.replay_log(table_mgr_);
-            if (OB_SUCCESS != err)
+            if (OB_SUCCESS != (err = log_mgr_.replay_log(table_mgr_)))
             {
               TBSYS_LOG(WARN, "failed to replay log, err=%d", err);
             }
+            else if (OB_SUCCESS != (err = log_mgr_.start_log(log_mgr_.get_max_log_id(), log_mgr_.get_cur_log_seq())))
+            {
+              TBSYS_LOG(ERROR, "ObUpsLogMgr start_log[get_max_log_id()=%lu get_cur_log_seq()=%lu",
+                  log_mgr_.get_max_log_id(), log_mgr_.get_cur_log_seq());
+            }
+            else if (OB_SUCCESS != (err = table_mgr_.write_start_log()))
+            {
+              TBSYS_LOG(ERROR, "write start flag to commitlog fail err=%d", err);
+            }
+            else if (OB_SUCCESS != (err = table_mgr_.sstable_scan_finished(param_.get_minor_num_limit())))
+            {
+              TBSYS_LOG(ERROR, "sstable_scan_finished error, err=%d", err);
+            }
             else
             {
-              err = table_mgr_.sstable_scan_finished(param_.get_minor_num_limit());
               table_mgr_.log_table_info();
             }
           }
@@ -367,46 +543,17 @@ namespace oceanbase
       // start read and write thread
       if (OB_SUCCESS == err)
       {
-        read_thread_queue_.start();
-        write_thread_queue_.start();
-        lease_thread_queue_.start();
-        err = timer_.init();
-      }
-
-      if (OB_SUCCESS == err)
-      {
-        bool repeat = true;
-        err = timer_.schedule(major_freeze_duty_, MajorFreezeDuty::SCHEDULE_PERIOD, repeat);
-        if (OB_SUCCESS != err)
+        err = set_timer_major_freeze();
+        if (OB_SUCCESS == err)
         {
-          TBSYS_LOG(WARN, "schedule major_freeze_duty fail err=%d", err);
+          err = set_timer_handle_fronzen();
         }
-      }
-
-      if (OB_SUCCESS == err)
-      {
-        bool repeat = true;
-        err = timer_.schedule(handle_frozen_duty_, HandleFrozenDuty::SCHEDULE_PERIOD, repeat);
-        if (OB_SUCCESS != err)
-        {
-          TBSYS_LOG(WARN, "schedule handle_frozen_duty fail err=%d", err);
-        }
-      }
-
-      // start check thread
-      if (OB_SUCCESS == err)
-      {
-        check_thread_.start();
       }
 
       // modify master status
       if (OB_SUCCESS == err)
       {
         role_mgr_.set_state(ObRoleMgr::ACTIVE);
-      }
-
-      if (OB_SUCCESS == err)
-      {
         err = submit_report_freeze();
       }
 
@@ -420,18 +567,207 @@ namespace oceanbase
       }
 
       // wait finish
-      while (OB_SUCCESS == err)
+      while (ObiRole::MASTER == obi_role_.get_role()
+             && ObRoleMgr::ACTIVE == role_mgr_.get_state())
       {
-        if (ObRoleMgr::STOP == role_mgr_.get_state()
-            || ObRoleMgr::ERROR == role_mgr_.get_state())
-        {
-          break;
-        }
-        usleep(10 * 1000); // sleep 10ms
+        usleep(10 * 1000);
       }
 
-      // stop server
-      timer_.destroy();
+      return err;
+    }
+
+    int ObUpdateServer::start_master_slave_()
+    {
+      int err = OB_SUCCESS;
+
+      if (OB_SUCCESS == err)
+      {
+        //log_thread_queue_.start();
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = set_schema();
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = init_slave_log_mgr();
+      }
+
+      uint64_t replay_point;
+      if (OB_SUCCESS == err)
+      {
+        err = register_and_start_fetch(ups_master_, replay_point);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = init_replay_thread(replay_point, 0);
+      }
+
+      // modify slave status
+      if (OB_SUCCESS == err)
+      {
+        role_mgr_.set_state(ObRoleMgr::ACTIVE);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = timer_.init();
+        if (OB_SUCCESS == err)
+        {
+          err = set_timer_handle_fronzen();
+        }
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        TBSYS_LOG(INFO, "start service, role=SLAVE");
+      }
+      else
+      {
+        TBSYS_LOG(ERROR, "start service fail, role=SLAVE, err=%d", err);
+      }
+
+      while (OB_SUCCESS == err
+          && ObiRole::MASTER == obi_role_.get_role()
+          && ObRoleMgr::STOP != role_mgr_.get_state()
+          && ObRoleMgr::ERROR != role_mgr_.get_state()
+          && ObRoleMgr::HOLD != role_mgr_.get_state())
+      {
+        // waiting slave switching
+        while (ObiRole::MASTER == obi_role_.get_role()
+               && ObRoleMgr::ACTIVE == role_mgr_.get_state())
+        {
+          // check status
+          usleep(10 * 1000); // sleep 10ms
+        }
+
+        if (ObiRole::MASTER != obi_role_.get_role())
+        {
+          TBSYS_LOG(WARN, "ObiRole is not MASTER");
+        }
+        else if (ObRoleMgr::ERROR == role_mgr_.get_state())
+        {
+          TBSYS_LOG(WARN, "ERROR occurs");
+        }
+        else if (ObRoleMgr::STOP == role_mgr_.get_state())
+        {
+          TBSYS_LOG(INFO, "STOP slave");
+        }
+        else if (ObRoleMgr::SWITCHING == role_mgr_.get_state())
+        {
+          // switching to master
+          TBSYS_LOG(INFO, "SWITCHING state happen");
+          role_mgr_.set_role(ObRoleMgr::MASTER);
+
+          //log_thread_queue_.stop();
+          //log_thread_queue_.wait();
+          write_thread_queue_.stop();
+          write_thread_queue_.wait();
+          write_thread_queue_.clear();
+          log_replay_thread_.wait();
+          fetch_thread_.wait();
+
+          write_thread_queue_.start();
+
+          err = table_mgr_.sstable_scan_finished(param_.get_minor_num_limit());
+          table_mgr_.log_table_info();
+
+          if (OB_SUCCESS == err)
+          {
+            bool repeat = true;
+            err = timer_.schedule(major_freeze_duty_, MajorFreezeDuty::SCHEDULE_PERIOD, repeat);
+            if (OB_SUCCESS != err)
+            {
+              TBSYS_LOG(WARN, "schedule major_freeze_duty fail err=%d", err);
+            }
+          }
+
+          if (OB_SUCCESS == err)
+          {
+            err = submit_report_freeze();
+          }
+
+          role_mgr_.set_state(ObRoleMgr::ACTIVE);
+
+          TBSYS_LOG(INFO, "switch SLAVE ==> MASTER succ");
+          // wait finish
+          while (OB_SUCCESS == err)
+          {
+            if (ObRoleMgr::STOP == role_mgr_.get_state()
+                || ObRoleMgr::ERROR == role_mgr_.get_state())
+            {
+              break;
+            }
+            usleep(10 * 1000); // sleep 10ms
+          }
+        }
+        else if (ObRoleMgr::INIT == role_mgr_.get_state())
+        {
+          // re-register
+          TBSYS_LOG(INFO, "REREGISTER slave");
+          // waiting fetch thread complete
+          fetch_thread_.wait();
+
+          //log_thread_queue_.stop();
+          //log_thread_queue_.wait();
+          //log_thread_queue_.clear();
+          write_thread_queue_.stop();
+          write_thread_queue_.wait();
+          write_thread_queue_.clear();
+
+          is_first_log_ = true;
+          is_registered_ = false;
+
+          log_mgr_.reset_log();
+
+          //log_thread_queue_.start();
+          write_thread_queue_.start();
+
+          ObUpsFetchParam fetch_param;
+          // slave register
+          if (OB_SUCCESS == err)
+          {
+            err = slave_register_followed(ups_master_, fetch_param);
+            if (OB_SUCCESS != err)
+            {
+              TBSYS_LOG(WARN, "failed to register, err=%d", err);
+            }
+          }
+
+          // restart fetch thread
+          if (OB_SUCCESS == err)
+          {
+            //fetch_param.min_log_id_ = last_max_log_id;
+            TBSYS_LOG(INFO, "restart fetch thread, min_log_id=%lu, max_log_id=%lu",
+                fetch_param.min_log_id_, fetch_param.max_log_id_);
+
+            fetch_thread_.clear();
+            fetch_thread_.set_fetch_param(fetch_param);
+            fetch_thread_.start();
+          }
+
+          if (OB_SUCCESS != err)
+          {
+            role_mgr_.set_state(ObRoleMgr::ERROR);
+            TBSYS_LOG(INFO, "REREGISTER slave err");
+          }
+          else
+          {
+            role_mgr_.set_state(ObRoleMgr::ACTIVE);
+            TBSYS_LOG(INFO, "REREGISTER slave succ");
+          }
+        }
+      }
+
+      if (ObRoleMgr::SLAVE == role_mgr_.get_role() && is_registered_)
+      {
+        ups_rpc_stub_.slave_quit(ups_master_, get_self(), DEFAULT_SLAVE_QUIT_TIMEOUT);
+        is_registered_ = false;
+      }
+
       cleanup();
       transport_.stop();
       transport_.wait();
@@ -439,6 +775,472 @@ namespace oceanbase
 
       return err;
     }
+
+    int ObUpdateServer::start_slave_master_()
+    {
+      int err = OB_SUCCESS;
+
+      if (OB_SUCCESS == err)
+      {
+        err = set_schema();
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = init_slave_log_mgr();
+      }
+
+      uint64_t log_id_start = 0, log_seq_start = 0;
+      if (OB_SUCCESS == err)
+      {
+        if (FOLLOWED_SLAVE == obi_slave_stat_)
+        {
+          err = register_and_start_fetch(ups_inst_master_, log_id_start);
+        }
+        else if (STANDALONE_SLAVE == obi_slave_stat_)
+        {
+          err = slave_standalone_prepare(log_id_start, log_seq_start);
+        }
+        else
+        {
+          TBSYS_LOG(ERROR, "Not FOLLOWED_SLAVE nor STANDALONE_SLAVE");
+          err = OB_ERROR;
+        }
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = init_replay_thread(log_id_start, log_seq_start);
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = set_timer_handle_fronzen();
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        return enter_slave_master();
+      }
+      else
+      {
+        return err;
+      }
+    }
+
+    int ObUpdateServer::start_slave_slave_()
+    {
+      int ret = OB_SUCCESS;
+
+      return ret;
+    }
+
+    int ObUpdateServer::enter_master_master()
+    {
+      int ret = OB_SUCCESS;
+
+      role_mgr_.set_state(ObRoleMgr::ACTIVE);
+
+      while (ObiRole::MASTER == obi_role_.get_role()
+             && ObRoleMgr::ACTIVE == role_mgr_.get_state())
+      {
+        usleep(10 * 1000);
+      }
+
+      return ret;
+    }
+
+    int ObUpdateServer::enter_slave_master()
+    {
+      int ret = OB_SUCCESS;
+
+      role_mgr_.set_state(ObRoleMgr::ACTIVE);
+      while (ObiRole::SLAVE == obi_role_.get_role()
+             && ObRoleMgr::ACTIVE == role_mgr_.get_state())
+      {
+        usleep(10 * 1000);
+      }
+
+      if (ObiRole::SLAVE == obi_role_.get_role())
+      {
+        if (ObRoleMgr::ERROR == role_mgr_.get_state())
+        {
+          TBSYS_LOG(WARN, "ERROR occurs");
+          ret = OB_ERROR;
+        }
+        else if (ObRoleMgr::STOP == role_mgr_.get_state())
+        {
+          TBSYS_LOG(INFO, "STOP slave");
+        }
+        else if (ObRoleMgr::INIT == role_mgr_.get_state())
+        {
+          if (FOLLOWED_SLAVE == obi_slave_stat_)
+          {
+            ret = reregister_followed(ups_inst_master_);
+          }
+          else if (STANDALONE_SLAVE == obi_slave_stat_)
+          {
+            ret = reregister_standalone();
+          }
+          else
+          {
+            TBSYS_LOG(WARN, "unknown ObiSlaveStat=%d", obi_slave_stat_);
+            ret = OB_ERROR;
+          }
+          if (OB_SUCCESS != ret)
+          {
+            role_mgr_.set_state(ObRoleMgr::ERROR);
+          }
+          else
+          {
+            return enter_slave_master();
+          }
+        }
+      }
+      else if (ObiRole::MASTER == obi_role_.get_role())
+      {
+        ret = switch_to_master_master();
+        if (OB_SUCCESS != ret)
+        {
+          role_mgr_.set_state(ObRoleMgr::ERROR);
+          TBSYS_LOG(ERROR, "switch SLAVE ==> MASTER failed");
+        }
+        else
+        {
+          TBSYS_LOG(INFO, "switch SLAVE ==> MASTER succ");
+          return enter_master_master();
+        }
+      }
+      else
+      {
+        TBSYS_LOG(ERROR, "Unknown ObiRole: %d", obi_role_.get_role());
+        ret = OB_ERROR;
+      }
+
+      return ret;
+    }
+
+    int ObUpdateServer::switch_to_master_master()
+    {
+      int err = OB_SUCCESS;
+
+      // switching to master
+      TBSYS_LOG(INFO, "SWITCHING state happen");
+      role_mgr_.set_role(ObRoleMgr::MASTER);
+
+      //log_thread_queue_.stop();
+      //log_thread_queue_.wait();
+      write_thread_queue_.stop();
+      write_thread_queue_.wait();
+      write_thread_queue_.clear();
+      if (STANDALONE_SLAVE == obi_slave_stat_)
+      {
+        fetch_lsync_.stop();
+        fetch_lsync_.wait();
+      }
+      log_replay_thread_.wait();
+      fetch_thread_.wait();
+
+      write_thread_queue_.start();
+      err = table_mgr_.sstable_scan_finished(param_.get_minor_num_limit());
+      table_mgr_.log_table_info();
+
+      if (OB_SUCCESS == err)
+      {
+        err = set_timer_major_freeze();
+      }
+
+      return err;
+    }
+
+    int ObUpdateServer::reregister_followed(const ObServer &master)
+    {
+      int err = OB_SUCCESS;
+
+      TBSYS_LOG(INFO, "reregister FOLLOWED SLAVE");
+      // waiting fetch thread complete
+      fetch_thread_.wait();
+
+      //log_thread_queue_.stop();
+      //log_thread_queue_.wait();
+      //log_thread_queue_.clear();
+      write_thread_queue_.stop();
+      write_thread_queue_.wait();
+      write_thread_queue_.clear();
+
+      is_first_log_ = true;
+      is_registered_ = false;
+
+      log_mgr_.reset_log();
+
+      //log_thread_queue_.start();
+      write_thread_queue_.start();
+
+      ObUpsFetchParam fetch_param;
+      // slave register
+      if (OB_SUCCESS == err)
+      {
+        err = slave_register_followed(master, fetch_param);
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(WARN, "failed to register, err=%d", err);
+        }
+      }
+
+      // restart fetch thread
+      if (OB_SUCCESS == err)
+      {
+        //fetch_param.min_log_id_ = last_max_log_id;
+        TBSYS_LOG(INFO, "restart fetch thread, min_log_id=%lu, max_log_id=%lu",
+            fetch_param.min_log_id_, fetch_param.max_log_id_);
+
+        fetch_thread_.clear();
+        fetch_thread_.set_fetch_param(fetch_param);
+        fetch_thread_.start();
+      }
+
+      if (OB_SUCCESS != err)
+      {
+        TBSYS_LOG(INFO, "REREGISTER err");
+      }
+      else
+      {
+        TBSYS_LOG(INFO, "REREGISTER succ");
+      }
+      return err;
+    }
+
+    int ObUpdateServer::reregister_standalone()
+    {
+      int err = OB_SUCCESS;
+
+      TBSYS_LOG(INFO, "reregister STANDALONE SLAVE");
+      is_registered_ = false;
+
+      // slave register
+      if (OB_SUCCESS == err)
+      {
+        uint64_t log_id_start = 0;
+        uint64_t log_seq_start = 0;
+        err = slave_register_standalone(log_id_start, log_seq_start);
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(WARN, "failed to register, err=%d", err);
+        }
+      }
+
+      if (OB_SUCCESS != err)
+      {
+        TBSYS_LOG(INFO, "REREGISTER err");
+      }
+      else
+      {
+        TBSYS_LOG(INFO, "REREGISTER succ");
+      }
+      return err;
+    }
+
+    int ObUpdateServer::set_schema()
+    {
+      int err = OB_SUCCESS;
+
+      if (!table_mgr_.get_schema_mgr().has_schema())
+      {
+        bool write_log = false;
+        err = update_schema(true, write_log);
+      }
+
+      return err;
+    }
+
+    int ObUpdateServer::set_timer_major_freeze()
+    {
+      int err = OB_SUCCESS;
+
+      bool repeat = true;
+      err = timer_.schedule(major_freeze_duty_, MajorFreezeDuty::SCHEDULE_PERIOD, repeat);
+      if (OB_SUCCESS != err)
+      {
+        TBSYS_LOG(WARN, "schedule major_freeze_duty fail err=%d", err);
+      }
+
+      return err;
+    }
+
+    int ObUpdateServer::set_timer_handle_fronzen()
+    {
+      int err = OB_SUCCESS;
+
+      bool repeat = true;
+      err = timer_.schedule(handle_frozen_duty_, HandleFrozenDuty::SCHEDULE_PERIOD, repeat);
+      if (OB_SUCCESS != err)
+      {
+        TBSYS_LOG(WARN, "schedule handle_frozen_duty fail err=%d", err);
+      }
+
+      return err;
+    }
+
+    int ObUpdateServer::init_slave_log_mgr()
+    {
+      int err = OB_SUCCESS;
+
+      int64_t log_file_max_size = param_.get_log_size_mb() * 1000L * 1000L;
+      err = log_mgr_.init(param_.get_log_dir_path(), log_file_max_size,
+          &slave_mgr_, &role_mgr_, param_.get_log_sync_type());
+      if (OB_SUCCESS != err)
+      {
+        TBSYS_LOG(WARN, "failed to init log mgr, path=%s, log_file_size=%ld, err=%d",
+            param_.get_log_dir_path(), log_file_max_size, err);
+      }
+      else
+      {
+        err = clog_receiver_.init(&log_mgr_, this, param_.get_trans_proc_time_warn_us());
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(WARN, "ObCommitLogReceiver init error, err=%d", err);
+        }
+      }
+
+      return err;
+    }
+
+    int ObUpdateServer::register_and_start_fetch(const ObServer &master, uint64_t &replay_point)
+    {
+      int err = OB_SUCCESS;
+
+      ObUpsFetchParam fetch_param;
+      if (OB_SUCCESS == err)
+      {
+        err = slave_register_followed(master, fetch_param);
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(WARN, "failed to register");
+        }
+      }
+
+      // start fetch thread
+      if (OB_SUCCESS == err)
+      {
+        err = fetch_thread_.init(master, param_.get_log_dir_path(), fetch_param, &role_mgr_, &log_replay_thread_, &sstable_mgr_);
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(WARN, "failed to init fetch thread, log_dir=%s, min_log_id=%ld, "
+              "max_log_id=%ld, err=%d", param_.get_log_dir_path(), fetch_param.min_log_id_,
+              fetch_param.max_log_id_, err);
+        }
+        else
+        {
+          err = fetch_thread_.set_usr_opt(param_.get_log_fetch_option());
+          if (OB_SUCCESS != err)
+          {
+            TBSYS_LOG(WARN, "fetch_thread_ set_usr_opt error, err=%d opt=%s", err, param_.get_log_fetch_option());
+          }
+          else
+          {
+            fetch_thread_.set_limit_rate(param_.get_log_sync_limit_kb());
+            fetch_thread_.start();
+          }
+        }
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        replay_point = fetch_param.min_log_id_;
+        log_mgr_.set_replay_point(fetch_param.min_log_id_);
+        TBSYS_LOG(INFO, "set log replay point to %lu", fetch_param.min_log_id_);
+      }
+
+      return err;
+    }
+
+    int ObUpdateServer::slave_standalone_prepare(uint64_t &log_id_start, uint64_t &log_seq_start)
+    {
+      int err = OB_SUCCESS;
+
+      if (OB_SUCCESS == err)
+      {
+        uint64_t log_id = sstable_mgr_.get_max_clog_id();
+        if (OB_INVALID_ID != log_id)
+        {
+          log_mgr_.set_replay_point(log_id);
+          TBSYS_LOG(INFO, "get max clog id=%lu", log_id);
+        }
+
+        if (OB_SUCCESS == err)
+        {
+          // replay log
+          err = log_mgr_.replay_log(table_mgr_);
+          if (OB_SUCCESS != err)
+          {
+            TBSYS_LOG(WARN, "failed to replay log, err=%d", err);
+          }
+          else
+          {
+            TBSYS_LOG(INFO, "replay log succ, log_id=%lu log_seq=%lu",
+                log_mgr_.get_max_log_id(), log_mgr_.get_cur_log_seq());
+          }
+        }
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        if (OB_SUCCESS != (err = slave_register_standalone(log_id_start, log_seq_start)))
+        {
+          TBSYS_LOG(ERROR, "failed to register to lsync");
+        }
+        else if (0 == log_id_start)
+        {
+          TBSYS_LOG(ERROR, "failed to register to lsync, lsync returned log_id_start=0");
+          err = OB_ERROR;
+        }
+        else
+        {
+          TBSYS_LOG(INFO, "set log_id_start=%lu log_seq_start=%lu", log_id_start, log_seq_start);
+          err = log_mgr_.start_log(log_id_start, log_seq_start);
+          if (OB_SUCCESS != err)
+          {
+            TBSYS_LOG(ERROR, "start log error, err=%d", err);
+          }
+        }
+      }
+
+      if (OB_SUCCESS == err)
+      {
+        err = fetch_lsync_.init(get_lsync_server(), log_id_start, log_seq_start,
+            &ups_rpc_stub_, &clog_receiver_, param_.get_lsync_fetch_timeout(), &role_mgr_);
+        if (OB_SUCCESS != err)
+        {
+          TBSYS_LOG(ERROR, "ObUpsFetchLsync init error, err=%d", err);
+        }
+        else
+        {
+          fetch_lsync_.start();
+          TBSYS_LOG(INFO, "Lsync fetch thread start");
+        }
+      }
+
+      return err;
+    }
+
+    int ObUpdateServer::init_replay_thread(const uint64_t log_id_start, const uint64_t log_seq_start)
+    {
+      int err = OB_SUCCESS;
+
+      err = log_replay_thread_.init(param_.get_log_dir_path(), log_id_start, log_seq_start, &role_mgr_, &obi_role_, param_.get_replay_wait_time_us());
+      if (OB_SUCCESS != err)
+      {
+        TBSYS_LOG(WARN, "failed to start log replay thread, log_dir=%s, log_id_start=%ld, log_seq_start=%ld, err=%d",
+            param_.get_log_dir_path(), log_id_start, log_seq_start, err);
+      }
+      else
+      {
+        log_replay_thread_.start();
+      }
+
+      return err;
+    }
+
 
     int ObUpdateServer::start_standalone_()
     {
@@ -486,261 +1288,6 @@ namespace oceanbase
       return err;
     }
 
-    int ObUpdateServer::start_slave_()
-    {
-      int err = OB_SUCCESS;
-
-      if (OB_SUCCESS == err)
-      {
-        // fetch schema
-        if (!table_mgr_.get_schema_mgr().has_schema())
-        {
-          bool write_log = false;
-          err = update_schema(true, write_log);
-        }
-      }
-
-      int64_t log_file_max_size = param_.get_log_size_mb() * 1000L * 1000L;
-      err = log_mgr_.init(param_.get_log_dir_path(), log_file_max_size,
-          &slave_mgr_, &role_mgr_, param_.get_log_sync_type());
-      if (OB_SUCCESS != err)
-      {
-        TBSYS_LOG(WARN, "failed to init log mgr, path=%s, log_file_size=%ld, err=%d",
-            param_.get_log_dir_path(), log_file_max_size, err);
-      }
-
-      if (OB_SUCCESS == err)
-      {
-        log_thread_queue_.start();
-      }
-
-      ObUpsFetchParam fetch_param;
-      if (OB_SUCCESS == err)
-      {
-        err = slave_register_(fetch_param);
-        if (OB_SUCCESS != err)
-        {
-          TBSYS_LOG(WARN, "failed to register");
-        }
-      }
-
-      // start fetch thread
-      if (OB_SUCCESS == err)
-      {
-        err = fetch_thread_.init(ups_master_, param_.get_log_dir_path(), fetch_param, &role_mgr_, &log_replay_thread_, &sstable_mgr_);
-        if (OB_SUCCESS != err)
-        {
-          TBSYS_LOG(WARN, "failed to init fetch thread, log_dir=%s, min_log_id=%ld, "
-              "max_log_id=%ld, err=%d", param_.get_log_dir_path(), fetch_param.min_log_id_,
-              fetch_param.max_log_id_, err);
-        }
-        else
-        {
-          err = fetch_thread_.set_usr_opt(param_.get_log_fetch_option());
-          if (OB_SUCCESS != err)
-          {
-            TBSYS_LOG(WARN, "fetch_thread_ set_usr_opt error, err=%d opt=%s", err, param_.get_log_fetch_option());
-          }
-          else
-          {
-            fetch_thread_.set_limit_rate(param_.get_log_sync_limit_kb());
-            fetch_thread_.start();
-          }
-        }
-      }
-
-      if (OB_SUCCESS == err)
-      {
-        log_mgr_.set_replay_point(fetch_param.min_log_id_);
-        TBSYS_LOG(INFO, "set log replay point to %lu", fetch_param.min_log_id_);
-      }
-
-      // start replay thread
-      if (OB_SUCCESS == err)
-      {
-        err = log_replay_thread_.init(param_.get_log_dir_path(), fetch_param.min_log_id_, &role_mgr_, param_.get_replay_wait_time_us());
-        if (OB_SUCCESS != err)
-        {
-          TBSYS_LOG(WARN, "failed to start log replay thread, log_dir=%s, min_log_id=%ld, err=%d",
-              param_.get_log_dir_path(), fetch_param.min_log_id_, err);
-        }
-        else
-        {
-          log_replay_thread_.start();
-        }
-      }
-
-      // modify slave status
-      if (OB_SUCCESS == err)
-      {
-        role_mgr_.set_state(ObRoleMgr::ACTIVE);
-      }
-
-      // start check thread
-      if (OB_SUCCESS == err)
-      {
-        check_thread_.start();
-        store_thread_.start();
-      }
-
-      if (OB_SUCCESS == err)
-      {
-        err = timer_.init();
-      }
-
-      if (OB_SUCCESS == err)
-      {
-        bool repeat = true;
-        err = timer_.schedule(handle_frozen_duty_, HandleFrozenDuty::SCHEDULE_PERIOD, repeat);
-        if (OB_SUCCESS != err)
-        {
-          TBSYS_LOG(WARN, "schedule handle_frozen_duty fail err=%d", err);
-        }
-      }
-
-      if (OB_SUCCESS == err)
-      {
-        TBSYS_LOG(INFO, "start service, role=SLAVE");
-      }
-      else
-      {
-        TBSYS_LOG(ERROR, "start service fail, role=SLAVE, err=%d", err);
-      }
-
-      while (OB_SUCCESS == err
-          && ObRoleMgr::STOP != role_mgr_.get_state()
-          && ObRoleMgr::ERROR != role_mgr_.get_state()
-          && ObRoleMgr::HOLD != role_mgr_.get_state())
-      {
-        // waiting slave switching
-        while (ObRoleMgr::ACTIVE == role_mgr_.get_state())
-        {
-          // check status
-          usleep(10 * 1000); // sleep 10ms
-        }
-
-        if (ObRoleMgr::ERROR == role_mgr_.get_state())
-        {
-          TBSYS_LOG(WARN, "ERROR occurs");
-        }
-        else if (ObRoleMgr::STOP == role_mgr_.get_state())
-        {
-          TBSYS_LOG(INFO, "STOP slave");
-        }
-        else if (ObRoleMgr::SWITCHING == role_mgr_.get_state())
-        {
-          // switching to master
-          TBSYS_LOG(INFO, "SWITCHING state happen");
-          role_mgr_.set_role(ObRoleMgr::MASTER);
-
-          log_thread_queue_.stop();
-          log_thread_queue_.wait();
-          log_replay_thread_.wait();
-          fetch_thread_.wait();
-
-          read_thread_queue_.start();
-          write_thread_queue_.start();
-          lease_thread_queue_.start();
-
-          err = table_mgr_.sstable_scan_finished(param_.get_minor_num_limit());
-          table_mgr_.log_table_info();
-
-          if (OB_SUCCESS == err)
-          {
-            bool repeat = true;
-            err = timer_.schedule(major_freeze_duty_, MajorFreezeDuty::SCHEDULE_PERIOD, repeat);
-            if (OB_SUCCESS != err)
-            {
-              TBSYS_LOG(WARN, "schedule major_freeze_duty fail err=%d", err);
-            }
-          }
-
-          if (OB_SUCCESS == err)
-          {
-            err = submit_report_freeze();
-          }
-
-          role_mgr_.set_state(ObRoleMgr::ACTIVE);
-          
-          TBSYS_LOG(INFO, "switch SLAVE ==> MASTER succ");
-          // wait finish
-          while (OB_SUCCESS == err)
-          {
-            if (ObRoleMgr::STOP == role_mgr_.get_state()
-                || ObRoleMgr::ERROR == role_mgr_.get_state())
-            {
-              break;
-            }
-            usleep(10 * 1000); // sleep 10ms
-          }
-        }
-        else if (ObRoleMgr::INIT == role_mgr_.get_state())
-        {
-          // re-register
-          TBSYS_LOG(INFO, "REREGISTER slave");
-          // waiting fetch thread complete
-          fetch_thread_.wait();
-
-          log_thread_queue_.stop();
-          log_thread_queue_.wait();
-          log_thread_queue_.clear();
-
-          is_first_log_ = true;
-          is_registered_ = false;
-
-          log_mgr_.reset_log();
-
-          log_thread_queue_.start();
-
-          // slave register
-          if (OB_SUCCESS == err)
-          {
-            err = slave_register_(fetch_param);
-            if (OB_SUCCESS != err)
-            {
-              TBSYS_LOG(WARN, "failed to register, err=%d", err);
-            }
-          }
-
-          // restart fetch thread
-          if (OB_SUCCESS == err)
-          {
-            //fetch_param.min_log_id_ = last_max_log_id;
-            TBSYS_LOG(INFO, "restart fetch thread, min_log_id=%lu, max_log_id=%lu",
-                fetch_param.min_log_id_, fetch_param.max_log_id_);
-
-            fetch_thread_.clear();
-            fetch_thread_.set_fetch_param(fetch_param);
-            fetch_thread_.start();
-          }
-
-          if (OB_SUCCESS != err)
-          {
-            role_mgr_.set_state(ObRoleMgr::ERROR);
-            TBSYS_LOG(INFO, "REREGISTER slave err");
-          }
-          else
-          {
-            role_mgr_.set_state(ObRoleMgr::ACTIVE);
-            TBSYS_LOG(INFO, "REREGISTER slave succ");
-          }
-        }
-      }
-
-      if (ObRoleMgr::SLAVE == role_mgr_.get_role() && is_registered_)
-      {
-        ups_rpc_stub_.slave_quit(ups_master_, get_self(), DEFAULT_SLAVE_QUIT_TIMEOUT);
-        is_registered_ = false;
-      }
-
-      cleanup();
-      transport_.stop();
-      transport_.wait();
-      TBSYS_LOG(INFO, "server stoped.");
-
-      return err;
-    }
-
     int ObUpdateServer::set_self_(const char* dev_name, const int32_t port)
     {
       int ret = OB_SUCCESS;
@@ -755,7 +1302,7 @@ namespace oceanbase
         bool res = self_addr_.set_ipv4_addr(ip, port);
         if (!res)
         {
-          TBSYS_LOG(ERROR, "chunk server dev:%s, port:%d is invalid.", 
+          TBSYS_LOG(ERROR, "chunk server dev:%s, port:%d is invalid.",
               dev_name, port);
           ret = OB_ERROR;
         }
@@ -763,32 +1310,7 @@ namespace oceanbase
 
       return ret;
     }
-    
-    #define RPC_CALL_WITH_RETRY(function, retry_times, timeout, args...) \
-      ({ \
-        int err = OB_RESPONSE_TIME_OUT; \
-        for (int64_t i = 0; ObRoleMgr::STOP != role_mgr_.get_state() \
-            && ObRoleMgr::ERROR != role_mgr_.get_state() \
-            && OB_SUCCESS != err && i < retry_times; ++i) \
-        { \
-          int64_t timeu = tbsys::CTimeUtil::getMonotonicTime(); \
-          err = ups_rpc_stub_.function(args, timeout); \
-          TBSYS_LOG(INFO, "%s, retry_times=%ld, err=%d", #function, i, err); \
-          timeu = tbsys::CTimeUtil::getMonotonicTime() - timeu; \
-          if (OB_SUCCESS != err \
-              && timeu < timeout) \
-          { \
-            TBSYS_LOG(INFO, "timeu=%ld not match timeout=%ld, will sleep %ld", timeu, timeout, timeout - timeu); \
-            int sleep_ret = precise_sleep(timeout - timeu); \
-            if (OB_SUCCESS != sleep_ret) \
-            { \
-              TBSYS_LOG(ERROR, "precise_sleep ret=%d"); \
-            } \
-          } \
-        } \
-        err; \
-      })
-    
+
     int ObUpdateServer::report_frozen_version_()
     {
       int ret = OB_SUCCESS;
@@ -858,7 +1380,7 @@ namespace oceanbase
       return err;
     }
 
-    int ObUpdateServer::slave_register_(ObUpsFetchParam& fetch_param)
+    int ObUpdateServer::slave_register_followed(const ObServer &master, ObUpsFetchParam& fetch_param)
     {
       int err = OB_SUCCESS;
       int64_t num_times = INT64_MAX;
@@ -866,11 +1388,11 @@ namespace oceanbase
       const ObServer& self_addr = get_self();
 
       ObSlaveInfo slave_info;
-      slave_info.self = self_addr; 
+      slave_info.self = self_addr;
       slave_info.min_sstable_id = sstable_mgr_.get_min_sstable_id();
       slave_info.max_sstable_id = sstable_mgr_.get_max_sstable_id();
 
-      err = RPC_CALL_WITH_RETRY(slave_register, num_times, timeout, ups_master_, slave_info, fetch_param);
+      err = RPC_CALL_WITH_RETRY(slave_register_followed, num_times, timeout, master, slave_info, fetch_param);
 
       if (ObRoleMgr::STOP == role_mgr_.get_state())
       {
@@ -918,13 +1440,55 @@ namespace oceanbase
       return err;
     }
 
+    int ObUpdateServer::slave_register_standalone(uint64_t &log_id_start, uint64_t &log_seq_start)
+    {
+      int err = OB_SUCCESS;
+      int64_t num_times = INT64_MAX;
+      int64_t timeout = param_.get_register_timeout_us();
+
+      log_seq_start = log_mgr_.get_cur_log_seq() == 0 ? 0 : log_mgr_.get_cur_log_seq();
+      log_id_start = log_seq_start == 0 ? 0 : log_mgr_.get_max_log_id();
+
+      err = RPC_CALL_WITH_RETRY(slave_register_standalone, num_times, timeout, get_lsync_server(),
+          log_id_start, log_seq_start, log_id_start, log_seq_start);
+
+      if (ObRoleMgr::STOP == role_mgr_.get_state())
+      {
+        TBSYS_LOG(INFO, "The Update Server Slave is stopped manually.");
+        err = OB_ERROR;
+      }
+      else if (OB_RESPONSE_TIME_OUT == err)
+      {
+        TBSYS_LOG(WARN, "slave register timeout, num_times=%d, timeout=%ldus",
+            num_times, timeout);
+        err = OB_RESPONSE_TIME_OUT;
+      }
+      else if (OB_SUCCESS != err)
+      {
+        TBSYS_LOG(WARN, "Error occurs when slave register, err=%d", err);
+      }
+
+      char addr_buf[ADDR_BUF_LEN];
+      get_lsync_server().to_string(addr_buf, sizeof(addr_buf));
+      addr_buf[ADDR_BUF_LEN - 1] = '\0';
+      TBSYS_LOG(INFO, "slave register, lsync_server=[%s], log_id_start=%ld, log_seq_start=%ld, err=%d",
+          addr_buf, log_id_start, log_seq_start, err);
+
+      if (OB_SUCCESS == err)
+      {
+        is_registered_ = true;
+      }
+
+      return err;
+    }
+
     tbnet::IPacketHandler::HPRetCode ObUpdateServer::handlePacket(tbnet::Connection *connection, tbnet::Packet *packet)
     {
       tbnet::IPacketHandler::HPRetCode rc = tbnet::IPacketHandler::FREE_CHANNEL;
       if (!packet->isRegularPacket())
       {
         TBSYS_LOG(WARN, "control packet, packet code: %d", ((tbnet::ControlPacket*)packet)->getCommand());
-      } 
+      }
       else
       {
         ObPacket* req = (ObPacket*) packet;
@@ -935,11 +1499,17 @@ namespace oceanbase
         TBSYS_LOG(DEBUG,"get packet code is %d, priority=%d", packet_code, priority);
         switch (packet_code)
         {
+          case OB_SET_OBI_ROLE:
+            ps = read_thread_queue_.push(req, read_task_queue_size_, false,
+                (NORMAL_PRI == priority)
+                  ? PriorityPacketQueueThread::NORMAL_PRIV
+                  : PriorityPacketQueueThread::LOW_PRIV);
+            break;
           case OB_SEND_LOG:
-          case OB_GRANT_LEASE_REQUEST:
-            if (ObRoleMgr::SLAVE == role_mgr_.get_role())
+            if (ObRoleMgr::SLAVE == role_mgr_.get_role()
+                || ObiRole::SLAVE == obi_role_.get_role())
             {
-              ps = log_thread_queue_.push(req, log_task_queue_size_, false);
+              ps = write_thread_queue_.push(req, log_task_queue_size_, false);
             }
             else
             {
@@ -947,14 +1517,30 @@ namespace oceanbase
             }
             break;
           case OB_WRITE:
+          case OB_SWITCH_SCHEMA:
+          case OB_UPS_FORCE_FETCH_SCHEMA:
+          case OB_UPS_SWITCH_COMMIT_LOG:
           case OB_SLAVE_REG:
           case OB_FREEZE_MEM_TABLE:
           case OB_UPS_MINOR_FREEZE_MEMTABLE:
           case OB_UPS_ASYNC_MAJOR_FREEZE_MEMTABLE:
+            if (ObiRole::MASTER != obi_role_.get_role()
+                || ObRoleMgr::MASTER != role_mgr_.get_role())
+            {
+              response_result_(OB_NOT_MASTER, OB_WRITE_RES, 1, connection, packet->getChannelId());
+              ps = false;
+            }
+            else if (ObRoleMgr::ACTIVE != role_mgr_.get_state())
+            {
+              response_result_(OB_NOT_MASTER, OB_WRITE_RES, 1, connection, packet->getChannelId());
+              ps = false;
+            }
+            else
+            {
+              ps = write_thread_queue_.push(req, write_task_queue_size_, false);
+            }
+            break;
           case OB_UPS_CLEAR_ACTIVE_MEMTABLE:
-          case OB_SWITCH_SCHEMA:
-          case OB_UPS_FORCE_FETCH_SCHEMA:
-          case OB_UPS_SWITCH_COMMIT_LOG:
             if (ObRoleMgr::MASTER == role_mgr_.get_role())
             {
               ps = write_thread_queue_.push(req, write_task_queue_size_, false);
@@ -964,6 +1550,8 @@ namespace oceanbase
               ps = false;
             }
             break;
+          case OB_GET_CLOG_CURSOR:
+          case OB_GET_CLOG_MASTER:
           case OB_GET_REQUEST:
           case OB_SCAN_REQUEST:
           case OB_UPS_GET_BLOOM_FILTER:
@@ -980,34 +1568,31 @@ namespace oceanbase
           case OB_FETCH_STATS:
           case OB_UPS_STORE_MEM_TABLE:
           case OB_UPS_DROP_MEM_TABLE:
+          case OB_UPS_DELAY_DROP_MEMTABLE:
+          case OB_UPS_IMMEDIATELY_DROP_MEMTABLE:
+          case OB_UPS_ASYNC_FORCE_DROP_MEMTABLE:
           case OB_UPS_ERASE_SSTABLE:
           case OB_UPS_LOAD_NEW_STORE:
           case OB_UPS_RELOAD_ALL_STORE:
           case OB_UPS_RELOAD_STORE:
           case OB_UPS_UMOUNT_STORE:
           case OB_UPS_FORCE_REPORT_FROZEN_VERSION:
-            if (ObRoleMgr::MASTER == role_mgr_.get_role())
-            {
-              ps = read_thread_queue_.push(req, read_task_queue_size_, false,
-                  (NORMAL_PRI == priority)
-                    ? PriorityPacketQueueThread::NORMAL_PRIV
-                    : PriorityPacketQueueThread::LOW_PRIV);
-            }
-            else
-            {
-              ps = false;
-            }
+            ps = read_thread_queue_.push(req, read_task_queue_size_, false,
+                (NORMAL_PRI == priority)
+                  ? PriorityPacketQueueThread::NORMAL_PRIV
+                  : PriorityPacketQueueThread::LOW_PRIV);
             break;
           case OB_SLAVE_QUIT:
           case OB_RENEW_LEASE_REQUEST:
-            if (ObRoleMgr::MASTER == role_mgr_.get_role())
-            {
+          case OB_GRANT_LEASE_REQUEST:
+//            if (ObRoleMgr::MASTER == role_mgr_.get_role())
+//            {
               ps = lease_thread_queue_.push(req, lease_task_queue_size_, false);
-            }
-            else
-            {
-              ps = false;
-            }
+//            }
+//            else
+//            {
+//              ps = false;
+//            }
             break;
           case OB_SET_SYNC_LIMIT_REQUEST:
           case OB_PING_REQUEST:
@@ -1018,7 +1603,7 @@ namespace oceanbase
             }
             else if (ObRoleMgr::SLAVE == role_mgr_.get_role())
             {
-              ps = log_thread_queue_.push(req, log_task_queue_size_, false);
+              ps = lease_thread_queue_.push(req, log_task_queue_size_, false);
             }
             else
             {
@@ -1037,7 +1622,7 @@ namespace oceanbase
           rc = tbnet::IPacketHandler::KEEP_CHANNEL;
           INC_STAT_INFO(UPS_STAT_TBSYS_DROP_COUNT, 1);
         }
-      } 
+      }
       return rc;
     }
 
@@ -1054,13 +1639,14 @@ namespace oceanbase
       UNUSED(args);
       bool ret = true;
       int return_code = OB_SUCCESS;
-      
+
       ObPacket* ob_packet = reinterpret_cast<ObPacket*>(packet);
       int packet_code = ob_packet->get_packet_code();
       int version = ob_packet->get_api_version();
+      int32_t priority = ob_packet->get_packet_priority();
       return_code = ob_packet->deserialize();
       uint32_t channel_id = ob_packet->getChannelId();//tbnet need this
-      if (OB_SUCCESS != return_code) 
+      if (OB_SUCCESS != return_code)
       {
         TBSYS_LOG(ERROR, "packet deserialize error packet code is %d", packet_code);
       }
@@ -1068,16 +1654,16 @@ namespace oceanbase
       {
         int64_t packet_timewait = (0 == ob_packet->get_source_timeout()) ?
                                   param_.get_packet_max_timewait() : ob_packet->get_source_timeout();
-        ObDataBuffer* in_buf = ob_packet->get_buffer(); 
+        ObDataBuffer* in_buf = ob_packet->get_buffer();
         in_buf->get_limit() = in_buf->get_position() + ob_packet->get_data_length();
         if ((ob_packet->get_receive_ts() + packet_timewait) < tbsys::CTimeUtil::getTime())
         {
           INC_STAT_INFO(UPS_STAT_PACKET_LONG_WAIT_COUNT, 1);
           TBSYS_LOG(WARN, "packet wait too long time, receive_time=%ld cur_time=%ld packet_max_timewait=%ld packet_code=%d "
-                    "last_log_network_elapse=%ld last_log_disk_elapse=%ld "
+                    "priority=%d last_log_network_elapse=%ld last_log_disk_elapse=%ld "
                     "read_task_queue_size=%d write_task_queue_size=%d lease_task_queue_size=%d log_task_queue_size=%d",
-                    ob_packet->get_receive_ts(), tbsys::CTimeUtil::getTime(), packet_timewait, packet_code,
-                    log_mgr_.get_last_net_elapse(), log_mgr_.get_last_disk_elapse(), 
+                    ob_packet->get_receive_ts(), tbsys::CTimeUtil::getTime(), packet_timewait, packet_code, priority,
+                    log_mgr_.get_last_net_elapse(), log_mgr_.get_last_disk_elapse(),
                     read_thread_queue_.size(), write_thread_queue_.size(), lease_thread_queue_.size(), log_thread_queue_.size());
         }
         else if (in_buf == NULL)
@@ -1096,6 +1682,9 @@ namespace oceanbase
             TBSYS_LOG(DEBUG, "handle packet, packe code is %d", packet_code);
             switch(packet_code)
             {
+              case OB_SET_OBI_ROLE:
+                return_code = set_obi_role(version, *in_buf, conn, channel_id, thread_buff);
+                break;
               case OB_SEND_LOG:
                 return_code = ups_slave_write_log(version, *in_buf, conn, channel_id, thread_buff);
                 break;
@@ -1105,19 +1694,25 @@ namespace oceanbase
               case OB_PING_REQUEST:
                 return_code = ups_ping(version, conn, channel_id);
                 break;
+              case OB_GET_CLOG_CURSOR:
+                return_code = ups_get_clog_cursor(version, conn, channel_id, thread_buff);
+                break;
+              case OB_GET_CLOG_MASTER:
+                return_code = ups_get_clog_master(version, conn, channel_id, thread_buff);
+                break;
               case OB_GET_REQUEST:
                 CLEAR_TRACE_LOG();
-                FILL_TRACE_LOG("start handle get, packet wait=%ld start_time=%ld timeout=%ld src=%s",
+                FILL_TRACE_LOG("start handle get, packet wait=%ld start_time=%ld timeout=%ld src=%s priority=%d",
                               tbsys::CTimeUtil::getTime() - ob_packet->get_receive_ts(),
-                              ob_packet->get_receive_ts(), packet_timewait, inet_ntoa_r(conn->getPeerId()));
-                return_code = ups_get(version, *in_buf, conn, channel_id, thread_buff, ob_packet->get_receive_ts(), packet_timewait);
+                              ob_packet->get_receive_ts(), packet_timewait, inet_ntoa_r(conn->getPeerId()), priority);
+                return_code = ups_get(version, *in_buf, conn, channel_id, thread_buff, ob_packet->get_receive_ts(), packet_timewait, priority);
                 break;
               case OB_SCAN_REQUEST:
                 CLEAR_TRACE_LOG();
-                FILL_TRACE_LOG("start handle scan, packet wait=%ld start_time=%ld timeout=%ld src=%s",
+                FILL_TRACE_LOG("start handle scan, packet wait=%ld start_time=%ld timeout=%ld src=%s priority=%d",
                               tbsys::CTimeUtil::getTime() - ob_packet->get_receive_ts(),
-                              ob_packet->get_receive_ts(), packet_timewait, inet_ntoa_r(conn->getPeerId()));
-                return_code = ups_scan(version, *in_buf, conn, channel_id, thread_buff, ob_packet->get_receive_ts(), packet_timewait);
+                              ob_packet->get_receive_ts(), packet_timewait, inet_ntoa_r(conn->getPeerId()), priority);
+                return_code = ups_scan(version, *in_buf, conn, channel_id, thread_buff, ob_packet->get_receive_ts(), packet_timewait, priority);
                 break;
               case OB_UPS_GET_BLOOM_FILTER:
                 return_code = ups_get_bloomfilter(version, *in_buf, conn, channel_id, thread_buff);
@@ -1132,7 +1727,7 @@ namespace oceanbase
                 return_code = ups_dump_text_schemas(version, conn, channel_id);
                 break;
               case OB_UPS_MEMORY_WATCH:
-                return_code = ups_memory_watch(version, conn, channel_id, thread_buff); 
+                return_code = ups_memory_watch(version, conn, channel_id, thread_buff);
                 break;
               case OB_UPS_MEMORY_LIMIT_SET:
                 return_code = ups_memory_limit_set(version, *in_buf, conn, channel_id, thread_buff);
@@ -1175,6 +1770,15 @@ namespace oceanbase
                 break;
               case OB_UPS_DROP_MEM_TABLE:
                 return_code = ups_drop_memtable(version, conn, channel_id);
+                break;
+              case OB_UPS_DELAY_DROP_MEMTABLE:
+                return_code = ups_delay_drop_memtable(version, conn, channel_id);
+                break;
+              case OB_UPS_IMMEDIATELY_DROP_MEMTABLE:
+                return_code = ups_immediately_drop_memtable(version, conn, channel_id);
+                break;
+              case OB_UPS_ASYNC_FORCE_DROP_MEMTABLE:
+                return_code = ups_drop_memtable();
                 break;
               case OB_UPS_ERASE_SSTABLE:
                 return_code = ups_erase_sstable(version, conn, channel_id);
@@ -1244,7 +1848,7 @@ namespace oceanbase
         return_code = ob_packet->deserialize();
         uint32_t channel_id = ob_packet->getChannelId();//tbnet need this
         //TBSYS_LOG(DEBUG, "packet i=%ld batch_num=%ld %s", i, batch_num, ob_packet->print_self());
-        if (OB_SUCCESS != return_code) 
+        if (OB_SUCCESS != return_code)
         {
           TBSYS_LOG(ERROR, "packet deserialize error packet code is %d", packet_code);
         }
@@ -1252,7 +1856,8 @@ namespace oceanbase
         {
           int64_t packet_timewait = (0 == ob_packet->get_source_timeout()) ?
                                     param_.get_packet_max_timewait() : ob_packet->get_source_timeout();
-          ObDataBuffer* in_buf = ob_packet->get_buffer(); 
+          ObDataBuffer* in_buf = ob_packet->get_buffer();
+          in_buf->get_limit() = in_buf->get_position() + ob_packet->get_data_length();
           if ((ob_packet->get_receive_ts() + packet_timewait)< tbsys::CTimeUtil::getTime())
           {
             INC_STAT_INFO(UPS_STAT_PACKET_LONG_WAIT_COUNT, 1);
@@ -1303,6 +1908,7 @@ namespace oceanbase
                     }
                   }
                   break;
+                case OB_SEND_LOG:
                 case OB_WRITE:
                   break;
                 default:
@@ -1406,6 +2012,9 @@ namespace oceanbase
                     }
                     break;
 
+                  case OB_SEND_LOG:
+                    return_code = ups_slave_write_log(version, *in_buf, conn, channel_id, thread_buff);
+                    break;
                   default:
                     TBSYS_LOG(WARN, "unexpected packet_code %d", packet_code);
                     return_code = OB_ERR_UNEXPECTED;
@@ -1441,16 +2050,21 @@ namespace oceanbase
       }
       packet_repl.get_buffer()->reset();
 
-      TableMgr::FreezeType freeze_type = TableMgr::AUTO_TRIG;
-      uint64_t frozen_version = 0;
-      bool report_version_changed = false;
-      if (OB_SUCCESS == table_mgr_.freeze_memtable(freeze_type, frozen_version, report_version_changed))
+      if (ObiRole::MASTER == obi_role_.get_role()
+          && ObRoleMgr::MASTER == role_mgr_.get_role()
+          && ObRoleMgr::ACTIVE == role_mgr_.get_state())
       {
-        if (report_version_changed)
+        TableMgr::FreezeType freeze_type = TableMgr::AUTO_TRIG;
+        uint64_t frozen_version = 0;
+        bool report_version_changed = false;
+        if (OB_SUCCESS == table_mgr_.freeze_memtable(freeze_type, frozen_version, report_version_changed))
         {
-          submit_report_freeze();
+          if (report_version_changed)
+          {
+            submit_report_freeze();
+          }
+          submit_handle_frozen();
         }
-        submit_handle_frozen();
       }
 
       return ret;//if return true packet will be deleted.
@@ -1464,6 +2078,75 @@ namespace oceanbase
     ObUpsRpcStub& ObUpdateServer::get_ups_rpc_stub()
     {
       return ups_rpc_stub_;
+    }
+
+    int ObUpdateServer::set_obi_role(const int32_t version, common::ObDataBuffer& in_buff,
+        tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff)
+    {
+      UNUSED(out_buff);
+
+      int err = OB_SUCCESS;
+
+      if (version != MY_VERSION)
+      {
+        err = OB_ERROR_FUNC_VERSION;
+      }
+
+      ObiRole obi_role;
+      err = obi_role.deserialize(in_buff.get_data(), in_buff.get_limit(), in_buff.get_position());
+      if (OB_SUCCESS != err)
+      {
+        TBSYS_LOG(ERROR, "ObiRole deserialize error, err=%d", err);
+      }
+      else
+      {
+        if (ObiRole::MASTER == obi_role.get_role())
+        {
+          if (ObiRole::MASTER == obi_role_.get_role())
+          {
+            TBSYS_LOG(INFO, "ObiRole is already MASTER");
+          }
+          else if (ObiRole::SLAVE == obi_role_.get_role())
+          {
+            role_mgr_.set_state(ObRoleMgr::SWITCHING);
+            obi_role_.set_role(ObiRole::MASTER);
+            TBSYS_LOG(INFO, "ObiRole is set to MASTER");
+          }
+          else if (ObiRole::INIT == obi_role_.get_role())
+          {
+            obi_role_.set_role(ObiRole::MASTER);
+            TBSYS_LOG(INFO, "ObiRole is set to MASTER");
+          }
+        }
+        else if (ObiRole::SLAVE == obi_role.get_role())
+        {
+          if (ObiRole::MASTER == obi_role_.get_role())
+          {
+            role_mgr_.set_state(ObRoleMgr::INIT);
+            obi_role_.set_role(ObiRole::SLAVE);
+            TBSYS_LOG(INFO, "ObiRole is set to SLAVE");
+          }
+          else if (ObiRole::SLAVE == obi_role_.get_role())
+          {
+            TBSYS_LOG(INFO, "ObiRole is already SLAVE");
+          }
+          else if (ObiRole::INIT == obi_role_.get_role())
+          {
+            obi_role_.set_role(ObiRole::SLAVE);
+            TBSYS_LOG(INFO, "ObiRole is set to SLAVE");
+          }
+        }
+        else
+        {
+          TBSYS_LOG(ERROR, "Unknown ObiRole: %d", obi_role.get_role());
+          err = OB_ERROR;
+        }
+      }
+
+      // send response to MASTER before writing to disk
+      err = response_result_(err, OB_SET_OBI_ROLE_RESPONSE, MY_VERSION, conn, channel_id);
+
+      return err;
     }
 
     int ObUpdateServer::ups_slave_write_log(const int32_t version, common::ObDataBuffer& in_buff,
@@ -1610,7 +2293,7 @@ namespace oceanbase
     {
       UNUSED(out_buff);
       int ret = OB_SUCCESS;
-      
+
       if (version != MY_VERSION)
       {
         ret = OB_ERROR_FUNC_VERSION;
@@ -1632,7 +2315,7 @@ namespace oceanbase
     int ObUpdateServer::ups_ping(const int32_t version, tbnet::Connection* conn, const uint32_t channel_id)
     {
       int ret = OB_SUCCESS;
-      
+
       if (version != MY_VERSION)
       {
         ret = OB_ERROR_FUNC_VERSION;
@@ -1643,9 +2326,120 @@ namespace oceanbase
       return ret;
     }
 
+    int ObUpdateServer::ups_get_clog_master(const int32_t version, tbnet::Connection* conn,
+                                            const uint32_t channel_id, common::ObDataBuffer& out_buff)
+    {
+      int err = OB_SUCCESS;
+      common::ObServer* master = NULL;
+      if (MY_VERSION != version)
+      {
+        err = OB_ERROR_FUNC_VERSION;
+        TBSYS_LOG(ERROR, "MY_VERSION[%d] != version[%d]", MY_VERSION, version);
+      }
+      else if (ObiRole::MASTER == obi_role_.get_role())
+      {
+        if (ObRoleMgr::MASTER == role_mgr_.get_role())
+        {
+          master = &self_addr_;
+        }
+        else if (ObRoleMgr::SLAVE == role_mgr_.get_role())
+        {
+          master = &ups_master_;
+        }
+        else
+        {
+          err = OB_ERROR;
+          TBSYS_LOG(ERROR, "ob_role != MASTER && obi_role != SLAVE");
+        }
+      }
+      else if (ObiRole::SLAVE == obi_role_.get_role())
+      {
+        if (ObRoleMgr::MASTER == role_mgr_.get_role())
+        {
+          if (STANDALONE_SLAVE == obi_slave_stat_)
+          {
+            master = &lsync_server_;
+          }
+          else if (FOLLOWED_SLAVE == obi_slave_stat_)
+          {
+            master = &ups_inst_master_;
+          }
+        }
+        else if (ObRoleMgr::SLAVE == role_mgr_.get_role())
+        {
+          if (STANDALONE_SLAVE == obi_slave_stat_)
+          {
+              //master = &lsync_server_;
+            err = OB_NOT_SUPPORTED;
+            TBSYS_LOG(ERROR, "slave slave ups not allowed to connect lsyncserver");
+          }
+          else if (FOLLOWED_SLAVE == obi_slave_stat_)
+          {
+            master = &ups_master_;
+          }
+        }
+        else
+        {
+          err = OB_ERROR;
+          TBSYS_LOG(ERROR, "ob_role != MASTER && obi_role != SLAVE");
+        }
+      }
+      else
+      {
+        err = OB_ERROR;
+        TBSYS_LOG(ERROR, "obi_role != MASTER && obi_role != SLAVE");
+      }
+
+      if (OB_SUCCESS != err)
+      {}
+      else if (NULL == master)
+      {
+        err = OB_ERR_UNEXPECTED;
+        TBSYS_LOG(ERROR, "NULL == master");
+      }
+      else if(OB_SUCCESS != (err = response_data_(err, *master, OB_GET_CLOG_MASTER_RESPONSE, MY_VERSION, conn, channel_id, out_buff)))
+      {
+        TBSYS_LOG(ERROR, "response_data()=>%d", err);
+      }
+
+      return err;
+    }
+
+    int ObUpdateServer::ups_get_clog_cursor(const int32_t version, tbnet::Connection* conn,
+                                            const uint32_t channel_id, common::ObDataBuffer& out_buff)
+    {
+      int err = OB_SUCCESS;
+      ObLogCursor log_cursor;
+      if (MY_VERSION != version)
+      {
+        err = OB_ERROR_FUNC_VERSION;
+        TBSYS_LOG(ERROR, "MY_VERSION[%d] != version[%d]", MY_VERSION, version);
+      }
+      else if (ObRoleMgr::SLAVE == role_mgr_.get_role()
+                || ObiRole::SLAVE == obi_role_.get_role())
+      {
+        log_replay_thread_.get_cur_replay_point(log_cursor.file_id_, log_cursor.log_id_, log_cursor.offset_);
+        TBSYS_LOG(INFO, "slave: file_id=%lu, log_id=%lu, offset=%lu", log_cursor.file_id_, log_cursor.log_id_, log_cursor.offset_);
+      }
+      else
+      {
+        log_mgr_.get_cur_log_point(log_cursor.file_id_, log_cursor.log_id_, log_cursor.offset_);
+        TBSYS_LOG(INFO, "master: file_id=%lu, log_id=%lu, offset=%lu", log_cursor.file_id_, log_cursor.log_id_, log_cursor.offset_);
+      }
+
+      if (OB_SUCCESS != err)
+      {}
+      else if(OB_SUCCESS != (err = response_data_(err, log_cursor, OB_GET_CLOG_CURSOR_RESPONSE, MY_VERSION, conn, channel_id, out_buff)))
+      {
+        TBSYS_LOG(ERROR, "response_data()=>%d", err);
+      }
+
+      return err;
+    }
+
     int ObUpdateServer::ups_get(const int32_t version, common::ObDataBuffer& in_buff,
         tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff,
-        const int64_t start_time, const int64_t timeout)
+        const int64_t start_time, const int64_t timeout, const int32_t priority)
     {
       int ret = OB_SUCCESS;
       ObGetParam get_param_stack;
@@ -1654,7 +2448,7 @@ namespace oceanbase
       ObScanner *scanner_ptr = GET_TSI(ObScanner);
       ObGetParam &get_param = (NULL == get_param_ptr) ? get_param_stack : *get_param_ptr;
       ObScanner &scanner = (NULL == scanner_ptr) ? scanner_stack : *scanner_ptr;
-      
+
       if (version != MY_VERSION)
       {
         ret = OB_ERROR_FUNC_VERSION;
@@ -1673,6 +2467,19 @@ namespace oceanbase
 
       if (OB_SUCCESS == ret)
       {
+        if (get_param.get_is_read_consistency())
+        {
+          if ( !(ObiRole::MASTER == obi_role_.get_role() && ObRoleMgr::MASTER == role_mgr_.get_role()) )
+          {
+            TBSYS_LOG(INFO, "The Get Request require consistency, ObiRole:%s RoleMgr:%s",
+                obi_role_.get_role_str(), role_mgr_.get_role_str());
+            ret = OB_NOT_MASTER;
+          }
+        }
+      }
+
+      if (OB_SUCCESS == ret)
+      {
         thread_read_prepare();
         scanner.reset();
         ret = table_mgr_.get(get_param, scanner, start_time, timeout);
@@ -1683,7 +2490,7 @@ namespace oceanbase
         FILL_TRACE_LOG("get from table mgr ret=%d", ret);
       }
 
-      ret = response_data_(ret, scanner, OB_GET_RESPONSE, MY_VERSION, conn, channel_id, out_buff);
+      ret = response_data_(ret, scanner, OB_GET_RESPONSE, MY_VERSION, conn, channel_id, out_buff, &priority);
       INC_STAT_INFO(UPS_STAT_GET_COUNT, 1);
       INC_STAT_INFO(UPS_STAT_GET_TIMEU, GET_TRACE_TIMEU());
       FILL_TRACE_LOG("response scanner ret=%d", ret);
@@ -1698,7 +2505,7 @@ namespace oceanbase
     int ObUpdateServer::response_data_(int32_t ret_code, const T &data,
                                           int32_t cmd_type, int32_t func_version,
                                           tbnet::Connection* conn, const uint32_t channel_id,
-                                          common::ObDataBuffer& out_buff)
+                                          common::ObDataBuffer& out_buff, const int32_t* priority)
     {
       int ret = OB_SUCCESS;
       common::ObResultCode result_msg;
@@ -1727,57 +2534,13 @@ namespace oceanbase
             ret = OB_ERROR;
           }
 
-          if (OB_SUCCESS == ret)
+          if (OB_SUCCESS == ret && NULL != priority && PriorityPacketQueueThread::LOW_PRIV == *priority)
           {
             low_priv_speed_control_(out_buff.get_position());
           }
         }
       }
 
-      return ret;
-    }
-
-    int ObUpdateServer::response_scanner_(int32_t ret_code, const ObScanner &scanner,
-                                          int32_t cmd_type, int32_t func_version,
-                                          tbnet::Connection* conn, const uint32_t channel_id,
-                                          common::ObDataBuffer& out_buff)
-    {
-      int ret = OB_SUCCESS;
-      common::ObResultCode result_msg;
-      result_msg.result_code_ = ret_code;
-      ret = result_msg.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position());
-      if (OB_SUCCESS != ret)
-      {
-        TBSYS_LOG(WARN, "serialize result msg error, ret=%d", ret);
-        ret = OB_ERROR;
-      }
-      else
-      {
-        common::ObDataBuffer tmp_buffer = out_buff;
-        ret = scanner.serialize(out_buff.get_data(), out_buff.get_capacity(), out_buff.get_position());
-        if (OB_SUCCESS != ret)
-        {
-          TBSYS_LOG(WARN, "serialize scanner error, ret=%d", ret);
-          ret = OB_ERROR;
-        }
-        else
-        {
-          ret = send_response(cmd_type, func_version, out_buff, conn, channel_id);
-          if (OB_SUCCESS != ret)
-          {
-            TBSYS_LOG(WARN, "failed to send scan response, ret=%d", ret);
-            ret = OB_ERROR;
-          }
-        }
-        ObScanner tmp_scanner;
-        tmp_scanner.deserialize(tmp_buffer.get_data(), tmp_buffer.get_capacity(), tmp_buffer.get_position());
-        while (OB_SUCCESS == tmp_scanner.next_cell())
-        {
-          ObCellInfo *ci = NULL;
-          tmp_scanner.get_cell(&ci, NULL);
-          TBSYS_LOG(DEBUG, "%s", print_cellinfo(ci));
-        }
-      }
       return ret;
     }
 
@@ -1853,7 +2616,7 @@ namespace oceanbase
 
     int ObUpdateServer::ups_scan(const int32_t version, common::ObDataBuffer& in_buff,
         tbnet::Connection* conn, const uint32_t channel_id, common::ObDataBuffer& out_buff,
-        const int64_t start_time, const int64_t timeout)
+        const int64_t start_time, const int64_t timeout, const int32_t priority)
     {
       int err = OB_SUCCESS;
       ObScanParam scan_param_stack;
@@ -1882,6 +2645,19 @@ namespace oceanbase
 
       if (OB_SUCCESS == err)
       {
+        if (scan_param.get_is_read_consistency())
+        {
+          if ( !(ObiRole::MASTER == obi_role_.get_role() && ObRoleMgr::MASTER == role_mgr_.get_role()) )
+          {
+            TBSYS_LOG(INFO, "The Scan Request require consistency, ObiRole:%s RoleMgr:%s",
+                obi_role_.get_role_str(), role_mgr_.get_role_str());
+            err = OB_NOT_MASTER;
+          }
+        }
+      }
+
+      if (OB_SUCCESS == err)
+      {
         thread_read_prepare();
         scanner.reset();
         err = table_mgr_.scan(scan_param, scanner, start_time, timeout);
@@ -1892,7 +2668,7 @@ namespace oceanbase
         FILL_TRACE_LOG("scan from table mgr ret=%d", err);
       }
 
-      err = response_data_(err, scanner, OB_SCAN_RESPONSE, MY_VERSION, conn, channel_id, out_buff);
+      err = response_data_(err, scanner, OB_SCAN_RESPONSE, MY_VERSION, conn, channel_id, out_buff, &priority);
       INC_STAT_INFO(UPS_STAT_SCAN_COUNT, 1);
       INC_STAT_INFO(UPS_STAT_SCAN_TIMEU, GET_TRACE_TIMEU());
       FILL_TRACE_LOG("response scanner ret=%d", err);
@@ -2016,6 +2792,48 @@ namespace oceanbase
     int ObUpdateServer::submit_major_freeze()
     {
       return submit_async_task_(OB_UPS_ASYNC_MAJOR_FREEZE_MEMTABLE, write_thread_queue_, write_task_queue_size_);
+    }
+
+    int ObUpdateServer::submit_force_drop()
+    {
+      return submit_async_task_(OB_UPS_ASYNC_FORCE_DROP_MEMTABLE, read_thread_queue_, read_task_queue_size_);
+    }
+
+    int ObUpdateServer::submit_immediately_drop()
+    {
+      int ret = OB_SUCCESS;
+      submit_delay_drop();
+      warm_up_duty_.finish_immediately();
+      return ret;
+    }
+
+    int ObUpdateServer::submit_delay_drop()
+    {
+      int ret = OB_SUCCESS;
+      if (warm_up_duty_.drop_start())
+      {
+        schedule_warm_up_duty();
+      }
+      else
+      {
+        TBSYS_LOG(INFO, "there is still a warm up duty running, will not schedule another");
+      }
+      return ret;
+    }
+
+    void ObUpdateServer::schedule_warm_up_duty()
+    {
+      int ret = OB_SUCCESS;
+      bool repeat = false;
+      if (OB_SUCCESS != (ret = timer_.schedule(warm_up_duty_, get_warm_up_conf().warm_up_step_interval_us, repeat)))
+      {
+        TBSYS_LOG(WARN, "schedule warm_up_duty fail ret=%d, will force drop", ret);
+        submit_force_drop();
+      }
+      else
+      {
+        TBSYS_LOG(INFO, "warm up start");
+      }
     }
 
     template <class Queue>
@@ -2150,6 +2968,38 @@ namespace oceanbase
       table_mgr_.drop_memtable(force);
       ret = response_result_(ret, OB_DROP_OLD_TABLETS_RESPONSE, MY_VERSION, conn, channel_id);
       return ret;
+    }
+
+    int ObUpdateServer::ups_delay_drop_memtable(const int32_t version, tbnet::Connection* conn, const uint32_t channel_id)
+    {
+      int ret = OB_SUCCESS;
+      if (version != MY_VERSION)
+      {
+        ret = OB_ERROR_FUNC_VERSION;
+      }
+      submit_delay_drop();
+      ret = response_result_(ret, OB_UPS_DELAY_DROP_MEMTABLE_RESPONSE, MY_VERSION, conn, channel_id);
+      return ret;
+    }
+
+    int ObUpdateServer::ups_immediately_drop_memtable(const int32_t version, tbnet::Connection* conn, const uint32_t channel_id)
+    {
+      int ret = OB_SUCCESS;
+      if (version != MY_VERSION)
+      {
+        ret = OB_ERROR_FUNC_VERSION;
+      }
+      submit_immediately_drop();
+      ret = response_result_(ret, OB_UPS_IMMEDIATELY_DROP_MEMTABLE_RESPONSE, MY_VERSION, conn, channel_id);
+      return ret;
+    }
+
+    int ObUpdateServer::ups_drop_memtable()
+    {
+      bool force = true;
+      table_mgr_.drop_memtable(force);
+      warm_up_duty_.drop_end();
+      return OB_SUCCESS;
     }
 
     int ObUpdateServer::ups_erase_sstable(const int32_t version, tbnet::Connection* conn, const uint32_t channel_id)
@@ -2399,7 +3249,7 @@ namespace oceanbase
       }
       return ret;
     }
-    
+
     int ObUpdateServer::ups_start_transaction(const MemTableTransType type, UpsTableMgrTransHandle& handle)
     {
       int ret = OB_SUCCESS;
@@ -2486,7 +3336,7 @@ namespace oceanbase
                   "last_log_network_elapse=%ld last_log_disk_elapse=%ld "
                   "read_task_queue_size=%d write_task_queue_size=%d lease_task_queue_size=%d log_task_queue_size=%d",
                   trans_proc_time, tbsys::CTimeUtil::getTime(), last_idx - start_idx + 1,
-                  log_mgr_.get_last_net_elapse(), log_mgr_.get_last_disk_elapse(), 
+                  log_mgr_.get_last_net_elapse(), log_mgr_.get_last_disk_elapse(),
                   read_thread_queue_.size(), write_thread_queue_.size(), lease_thread_queue_.size(), log_thread_queue_.size());
       }
 
@@ -2534,6 +3384,10 @@ namespace oceanbase
           {
             memtable_attr.total_memlimit = param_.get_table_memory_limit();
             table_mgr_.set_memtable_attr(memtable_attr);
+          }
+          if (param_.get_low_priv_cur_percent() >= 0)
+          {
+            read_thread_queue_.set_low_priv_cur_percent(param_.get_low_priv_cur_percent());
           }
         }
       }
@@ -2663,9 +3517,9 @@ namespace oceanbase
       }
       if (OB_SUCCESS == ret)
       {
+        ret = response_result_(ret, OB_UPS_DUMP_TEXT_MEMTABLE_RESPONSE, MY_VERSION, conn, channel_id);
         table_mgr_.dump_memtable(dump_dir);
       }
-      ret = response_result_(ret, OB_UPS_DUMP_TEXT_MEMTABLE_RESPONSE, MY_VERSION, conn, channel_id);
       return ret;
     }
 
@@ -2778,16 +3632,15 @@ namespace oceanbase
         if (OB_SUCCESS == ret)
         {
           param_.set_priv_queue_conf(priv_queue_conf);
-          read_thread_queue_.setWaitTime(priv_queue_conf.high_priv_cur_wait_time_ms);
+          if (param_.get_low_priv_cur_percent() >= 0)
+          {
+            read_thread_queue_.set_low_priv_cur_percent(param_.get_low_priv_cur_percent());
+          }
         }
         priv_queue_conf.low_priv_network_lower_limit = param_.get_low_priv_network_lower_limit();
         priv_queue_conf.low_priv_network_upper_limit = param_.get_low_priv_network_upper_limit();
-        priv_queue_conf.high_priv_max_wait_time_ms = param_.get_high_priv_max_wait_time_us() / 1000L;
-        priv_queue_conf.high_priv_adjust_time_ms = param_.get_high_priv_adjust_time_us() / 1000L;
-        int high_priv_wait_ms = 0;
-        int low_priv_wait_ms = 0;
-        read_thread_queue_.getWaitTime(high_priv_wait_ms, low_priv_wait_ms);
-        priv_queue_conf.high_priv_cur_wait_time_ms = high_priv_wait_ms;
+        priv_queue_conf.low_priv_adjust_flag = param_.get_low_priv_adjust_flag();
+        priv_queue_conf.low_priv_cur_percent = param_.get_low_priv_cur_percent();
       }
 
       ret = response_data_(ret, priv_queue_conf, OB_UPS_PRIV_QUEUE_CONF_SET_RESPONSE, MY_VERSION,
@@ -2805,7 +3658,7 @@ namespace oceanbase
       }
       if (OB_SUCCESS == ret)
       {
-        ret = table_mgr_.clear_active_memtable(); 
+        ret = table_mgr_.clear_active_memtable();
       }
       ret = response_result_(ret, OB_UPS_CLEAR_ACTIVE_MEMTABLE_RESPONSE, MY_VERSION, conn, channel_id);
       return ret;
@@ -2929,6 +3782,7 @@ namespace oceanbase
       static volatile int64_t s_stat_times = 0;
       static volatile int64_t s_stat_size = 0;
       static volatile int64_t s_last_stat_time_ms = tbsys::CTimeUtil::getTime() / 1000L;
+      static volatile int32_t flag = 0;
 
       if (scanner_size < 0)
       {
@@ -2940,67 +3794,129 @@ namespace oceanbase
         atomic_inc((volatile uint64_t*) &s_stat_times);
         atomic_add((volatile uint64_t*) &s_stat_size, scanner_size);
 
-
         if (s_stat_times >= SEG_STAT_TIMES || s_stat_size >= SEG_STAT_SIZE * 1024L * 1024L)
         {
-          int64_t cur_time_ms = tbsys::CTimeUtil::getTime() / 1000L;
-
-          TBSYS_LOG(DEBUG, "stat_size=%ld cur_time_ms=%ld last_stat_time_ms=%ld", s_stat_size,
-              cur_time_ms, s_last_stat_time_ms);
-
-          int64_t lower_limit = param_.get_low_priv_network_lower_limit() * 1024L * 1024L;
-          int64_t upper_limit = param_.get_low_priv_network_upper_limit() * 1024L * 1024L;
-          int64_t max_wait_time_ms = param_.get_high_priv_max_wait_time_us() / 1000L;
-          int64_t adjust_time_ms = param_.get_high_priv_adjust_time_us() / 1000L;
-
-          int cur_wait_time_ms = 0;
-          int tmp_wait_time_ms = 0;
-          read_thread_queue_.getWaitTime(cur_wait_time_ms, tmp_wait_time_ms);
-          int64_t ori_wait_time_ms = cur_wait_time_ms;
-
-          if (s_stat_size * 1000L < lower_limit * (cur_time_ms - s_last_stat_time_ms))
+          if (atomic_compare_exchange((volatile uint32_t*) &flag, 1, 0) == 0)
           {
-            if (cur_wait_time_ms > adjust_time_ms)
-            {
-              cur_wait_time_ms -= adjust_time_ms;
-            }
-            else
-            {
-              cur_wait_time_ms = 1; // set wait time to 1ms
-            }
-            read_thread_queue_.setWaitTime(cur_wait_time_ms);
+            // only one thread is allowed to adjust network limit
+            int64_t cur_time_ms = tbsys::CTimeUtil::getTime() / 1000L;
 
-            if (cur_wait_time_ms != ori_wait_time_ms)
+            TBSYS_LOG(DEBUG, "stat_size=%ld cur_time_ms=%ld last_stat_time_ms=%ld", s_stat_size,
+                cur_time_ms, s_last_stat_time_ms);
+
+            int64_t adjust_flag = param_.get_low_priv_adjust_flag();
+
+            if (1 == adjust_flag) // auto adjust low priv percent
             {
-              TBSYS_LOG(INFO, "network lower limit, lower_limit=%ld, cur_wait_time_ms=%ld, "
-                  "adjust_time_ms=%ld", lower_limit, cur_wait_time_ms, adjust_time_ms);
+              int64_t lower_limit = param_.get_low_priv_network_lower_limit() * 1024L * 1024L;
+              int64_t upper_limit = param_.get_low_priv_network_upper_limit() * 1024L * 1024L;
+
+              int64_t low_priv_percent = read_thread_queue_.get_low_priv_cur_percent();
+
+              if (s_stat_size * 1000L < lower_limit * (cur_time_ms - s_last_stat_time_ms))
+              {
+                if (low_priv_percent < PriorityPacketQueueThread::LOW_PRIV_MAX_PERCENT)
+                {
+                  ++low_priv_percent;
+                  read_thread_queue_.set_low_priv_cur_percent(low_priv_percent);
+
+                  TBSYS_LOG(INFO, "network lower limit, lower_limit=%ld, low_priv_percent=%ld",
+                      lower_limit, low_priv_percent);
+                }
+              }
+              else if (s_stat_size * 1000L > upper_limit * (cur_time_ms - s_last_stat_time_ms))
+              {
+                if (low_priv_percent > PriorityPacketQueueThread::LOW_PRIV_MIN_PERCENT)
+                {
+                  --low_priv_percent;
+                  read_thread_queue_.set_low_priv_cur_percent(low_priv_percent);
+
+                  TBSYS_LOG(INFO, "network upper limit, upper_limit=%ld, low_priv_percent=%ld",
+                      upper_limit, low_priv_percent);
+                }
+              }
             }
+
+            // reset stat_times, stat_size and last_stat_time
+            s_stat_times = 0;
+            s_stat_size = 0;
+            s_last_stat_time_ms = cur_time_ms;
+
+            flag = 0;
           }
-          else if (s_stat_size * 1000L > upper_limit * (cur_time_ms - s_last_stat_time_ms))
-          {
-            cur_wait_time_ms += adjust_time_ms;
-            if (cur_wait_time_ms > max_wait_time_ms)
-            {
-              cur_wait_time_ms = max_wait_time_ms; // set to max wait time
-            }
-            read_thread_queue_.setWaitTime(cur_wait_time_ms);
-
-            if (cur_wait_time_ms != ori_wait_time_ms)
-            {
-              TBSYS_LOG(INFO, "network upper limit, upper_limit=%ld, cur_wait_time_ms=%ld, "
-                  "adjust_time_ms=%ld, max_wait_time_ms=%ld", upper_limit, cur_wait_time_ms,
-                  adjust_time_ms, max_wait_time_ms);
-            }
-          }
-
-          // reset stat_times, stat_size and last_stat_time
-          s_stat_times = 0;
-          s_stat_size = 0;
-          s_last_stat_time_ms = cur_time_ms;
         }
       }
 
       return ret;
+    }
+
+    ////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    UpsWarmUpDuty::UpsWarmUpDuty() : duty_start_time_(0),
+                                     cur_warm_up_percent_(0),
+                                     duty_waiting_(0)
+    {
+    }
+
+    UpsWarmUpDuty::~UpsWarmUpDuty()
+    {
+    }
+
+    bool UpsWarmUpDuty::drop_start()
+    {
+      bool bret = false;
+      if (0 == atomic_compare_exchange(&duty_waiting_, 1, 0))
+      {
+        bret = true;
+      }
+      else
+      {
+        if (0 != duty_start_time_
+            && tbsys::CTimeUtil::getTime() > (MAX_DUTY_IDLE_TIME + duty_start_time_))
+        {
+          TBSYS_LOG(WARN, "duty has run too long and will be rescheduled, duty_start_time=%ld",
+                    duty_start_time_);
+          bret = true;
+        }
+      }
+      if (bret)
+      {
+        duty_start_time_ = tbsys::CTimeUtil::getTime();
+        cur_warm_up_percent_ = 0;
+      }
+      return bret;
+    }
+
+    void UpsWarmUpDuty::drop_end()
+    {
+      atomic_exchange(&duty_waiting_, 0);
+      duty_start_time_ = 0;
+      cur_warm_up_percent_ = 0;
+    }
+
+    void UpsWarmUpDuty::finish_immediately()
+    {
+      duty_start_time_ = 0;
+    }
+
+    void UpsWarmUpDuty::runTimerTask()
+    {
+      if (tbsys::CTimeUtil::getTime() > (duty_start_time_ + get_warm_up_conf().warm_up_time_s * 1000L * 1000L))
+      {
+        submit_force_drop();
+        TBSYS_LOG(INFO, "warm up finished, will drop memtable, cur_warm_up_percent=%ld cur_time=%ldus warm_time=%lds",
+                  cur_warm_up_percent_, tbsys::CTimeUtil::getTime(), get_warm_up_conf().warm_up_time_s);
+      }
+      else
+      {
+        if (CacheWarmUpConf::STOP_PERCENT > cur_warm_up_percent_)
+        {
+          cur_warm_up_percent_++;
+          TBSYS_LOG(INFO, "warm up percent update to %ld \%", cur_warm_up_percent_);
+          set_warm_up_percent(cur_warm_up_percent_);
+        }
+        schedule_warm_up_duty();
+      }
     }
 
   }

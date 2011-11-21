@@ -14,6 +14,10 @@ LDADD = $(top_builddir)/src/chunkserver/libchunkserver.a \
 
 AM_LDFLAGS = -lpthread -lc -lm -lrt -ldl -lnuma
 CXXFLAGS = -D__STDC_LIMIT_MACROS -g -Wall -DORDER_SERIALIZE #-O2 -fno-strict-aliasing
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_PROGRAMS = syschecker
 
@@ -37,3 +41,5 @@ EXTRA_DIST = ob_syschecker_main.h \
 						 ob_syschecker_schema.h
 
 SUBDIRS=client
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

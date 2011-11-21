@@ -696,24 +696,9 @@ namespace oceanbase
       return ret;
     }
 
-    int ObAIOBufferMgr::internal_init_read_range(const bool read_cache,
-                                                 const bool reverse_scan)
+    int ObAIOBufferMgr::reset_both_aio_buffer()
     {
-      int ret                       = OB_SUCCESS;
-      int64_t total_size            = 0;
-      int64_t preread_size          = 0;
-      bool cur_range_assign         = false;
-      bool preread_range_assign     = false;
-      bool check_cache              = read_cache;
-      int32_t block_size            = -1;
-      int64_t i                     = 0;
-      int64_t start                 = reverse_scan ? block_count_ - 1 : 0;
-      int64_t end                   = reverse_scan ? 0 : block_count_;
-      int64_t preread_buf_idx       = (cur_buf_idx_ + 1) % AIO_BUFFER_COUNT;
-      ObAIOBuffer& cur_aio_buf      = buffer_[cur_buf_idx_];
-      ObAIOBuffer& preread_aio_buf  = buffer_[preread_buf_idx];
-      int64_t cur_buf_read_size     = 0;
-      int64_t preread_buf_read_size = 0;
+      int ret = OB_SUCCESS;
 
       if (!check_aio_buf_free())
       {
@@ -723,12 +708,414 @@ namespace oceanbase
       }
       else
       {
-        ret = cur_aio_buf.reset();
+        ret = buffer_[cur_buf_idx_].reset();
         if (OB_SUCCESS == ret)
         {
-          ret = preread_aio_buf.reset();
+          ret = buffer_[(cur_buf_idx_ + 1) % AIO_BUFFER_COUNT].reset();
         }
       }
+
+      return ret;
+    }
+
+    int ObAIOBufferMgr::cur_aio_buf_add_block(
+      bool& cur_range_assign, const int64_t block_idx, 
+      const int64_t block_size, const int64_t total_size, 
+      const bool check_cache, const bool reverse_scan,
+      ObBufferHandle& buffer_handle)
+    {
+      int ret = OB_SUCCESS;
+
+      if (!cur_range_assign)
+      {
+        if (!can_fit_aio_buffer(total_size))
+        {
+          /**
+           * currnet aio buffer can't store all the data, asign the block 
+           * range of current aio buffer to read, and assign the start 
+           * block of preread 
+           */
+          if (!reverse_scan)
+          {
+            cur_read_block_idx_ = 0;
+            end_curread_block_idx_ = block_idx;
+            preread_block_idx_ = block_idx;
+          }
+          else
+          {
+            cur_read_block_idx_ = block_idx + 1;
+            end_curread_block_idx_ = block_count_;
+            end_preread_block_idx_ = block_idx + 1;
+          }
+          cur_range_assign = true;
+          ret = set_aio_buf_block_info(cur_buf_idx_, check_cache);
+        }
+        else if (check_cache)
+        {
+          //copy block to aio buffer from block cache
+          block_[block_idx].cached_ = true;
+          copy_from_cache_ = true;
+          ret = buffer_[cur_buf_idx_].put_cache_block(
+            buffer_handle.get_buffer(), block_size, reverse_scan);
+        }
+      }
+
+      return ret;
+    }
+
+    int ObAIOBufferMgr::preread_aio_buf_add_block(
+      const bool cur_range_assign, bool& preread_range_assign,
+      const int64_t block_idx, const int64_t block_size, 
+      int64_t& preread_size, const bool check_cache, 
+      const bool reverse_scan, ObBufferHandle& buffer_handle)
+    {
+      int ret                 = OB_SUCCESS;
+      int64_t preread_buf_idx = (cur_buf_idx_ + 1) % AIO_BUFFER_COUNT;
+
+      if (OB_SUCCESS == ret && cur_range_assign && !preread_range_assign)
+      {
+        preread_size += block_size;
+        if (!can_fit_aio_buffer(preread_size))
+        {
+          /**
+           * preread aio buffer is also can't store the left data, set the 
+           * end block of preread aio buffer. 
+           */
+          if (!reverse_scan)
+          {
+            end_preread_block_idx_ = block_idx;
+          }
+          else
+          {
+            preread_block_idx_ = block_idx + 1;
+          }
+          preread_range_assign = true;
+          ret = set_aio_buf_block_info(preread_buf_idx, check_cache);
+        }
+        else if (check_cache)
+        {
+          //copy block to aio buffer from block cache
+          block_[block_idx].cached_ = true;
+          copy_from_cache_ = true;
+          ret = buffer_[preread_buf_idx].put_cache_block(
+            buffer_handle.get_buffer(), block_size, reverse_scan);
+        }
+      }
+
+      return ret;
+    }
+    
+    int ObAIOBufferMgr::do_first_block_noexist_in_cache(
+      bool& cur_range_assign, bool& preread_range_assign,
+      bool& check_cache, const int64_t block_idx, 
+      const bool reverse_scan)
+    {
+      int ret                       = OB_SUCCESS;
+      int64_t cur_buf_read_size     = 0;
+      int64_t preread_buf_read_size = 0;
+      int64_t preread_buf_idx       = (cur_buf_idx_ + 1) % AIO_BUFFER_COUNT;
+
+      /**
+       * the first block not in block cache, we read the block and 
+       * follwing block from sstable file. so reset copy_from_cache_ 
+       * flag.
+       */
+      copy_from_cache_ = false;
+      cur_buf_read_size = buffer_[cur_buf_idx_].get_read_size();
+      preread_buf_read_size = buffer_[preread_buf_idx].get_read_size();
+      if (!cur_range_assign && !preread_range_assign)
+      {
+        if (cur_buf_read_size == 0 && 0 == preread_buf_read_size)
+        {
+          //no block data in cache, try without check cache 
+          check_cache = false;
+          ret = OB_CS_EAGAIN;
+        }
+        else if (cur_buf_read_size > 0 && 0 == preread_buf_read_size)
+        {
+          /**
+           * current aio buffer has blocks, preread aio buffer has no 
+           * block. if there is one block at least copied from cache, we 
+           * don't use this aio buffer to read block from sstable file 
+           * before the blocks are getten by user. 
+           */
+          if (!reverse_scan)
+          {
+            cur_read_block_idx_ = 0;
+            end_curread_block_idx_ = block_idx;
+            preread_block_idx_ = block_idx;
+          }
+          else
+          {
+            cur_read_block_idx_ = block_idx + 1;
+            end_curread_block_idx_ = block_count_;
+            end_preread_block_idx_ = block_idx + 1;
+          }
+          cur_range_assign = true;
+          ret = set_aio_buf_block_info(cur_buf_idx_, check_cache);
+        }
+        else
+        {
+          TBSYS_LOG(WARN, "unexpected stauts, cur_range_assign=%d, "
+                          "preread_range_assign=%d, cur_buf_read_size=%ld, "
+                          "preread_buf_read_size=%ld, block_index=%ld", 
+                    cur_range_assign, preread_range_assign, cur_buf_read_size,
+                    preread_buf_read_size, block_idx);
+          ret = OB_ERROR;
+        }
+      }
+      else if (cur_range_assign && !preread_range_assign)
+      {
+        //both aio buffer has blocks
+        if (cur_buf_read_size > 0 && preread_buf_read_size > 0)
+        {
+          if (!reverse_scan)
+          {
+            end_preread_block_idx_ = block_idx;
+          }
+          else
+          {
+            preread_block_idx_ = block_idx + 1;
+          }
+          preread_range_assign = true;
+          ret = set_aio_buf_block_info(preread_buf_idx, check_cache);
+        }
+        else
+        {
+          TBSYS_LOG(WARN, "unexpected stauts, cur_range_assign=%d, "
+                          "preread_range_assign=%d, cur_buf_read_size=%ld, "
+                          "preread_buf_read_size=%ld, block_index=%ld", 
+                    cur_range_assign, preread_range_assign, cur_buf_read_size,
+                    preread_buf_read_size, block_idx);
+          ret = OB_ERROR;
+        }
+      }
+
+      return ret;
+    }
+
+    int ObAIOBufferMgr::do_all_blocks_in_cache(
+      const bool cur_range_assign, const bool preread_range_assign,
+      const bool check_cache, const bool reverse_scan)
+    {
+      int ret                 = OB_SUCCESS;
+      int64_t preread_buf_idx = (cur_buf_idx_ + 1) % AIO_BUFFER_COUNT;
+
+      /**
+       * all blocks copy from block cache
+       */
+      if (!cur_range_assign && !preread_range_assign)
+      {
+        cur_read_block_idx_ = 0;
+        end_curread_block_idx_ = block_count_;
+        if (!reverse_scan)
+        {
+          preread_block_idx_ = block_count_;
+          end_preread_block_idx_ = block_count_;
+        }
+        else
+        {
+          preread_block_idx_ = 0;
+          end_preread_block_idx_ = 0;
+        }
+        ret = set_aio_buf_block_info(cur_buf_idx_, check_cache);
+      }
+      else if (cur_range_assign && !preread_range_assign)
+      {
+        if (!reverse_scan)
+        {
+          end_preread_block_idx_ = block_count_;
+        }
+        else
+        {
+          preread_block_idx_ = 0;
+        }
+        ret = set_aio_buf_block_info(preread_buf_idx, check_cache);
+      }
+      else
+      {
+        //both aio buffer read range are assigned, do nothing.
+      }
+
+      return ret;
+    }
+
+    void ObAIOBufferMgr::do_either_aio_buf_assigned(
+      const int64_t total_size, const bool reverse_scan)
+    {
+      int64_t i             = 0;
+      int64_t start         = 0;
+      int64_t end           = 0;
+      int64_t preread_size  = 0;
+
+      //total blocks size is less than 512K, only use one aio buffer to read
+      if (total_size <= MIN_PREREAD_SIZE)
+      {
+        if (!reverse_scan)
+        {
+          cur_read_block_idx_ = 0;
+          end_curread_block_idx_ = block_count_;
+          preread_block_idx_ = block_count_;
+          end_preread_block_idx_ = block_count_;
+        }
+        else
+        {
+          cur_read_block_idx_ = 0;
+          end_curread_block_idx_ = block_count_;
+          preread_block_idx_ = 0;
+          end_preread_block_idx_ = 0;
+        }
+      }
+      else if (can_fit_aio_buffer(total_size))
+      {
+        /**
+         * if 512K < total_size < 1M, and there are more than 1 block, 
+         * use two aio buffer to read, each aio buffer read about half 
+         * of data. if there is only 1 block, use one aio buffer to 
+         * read. 
+         */
+        if (!reverse_scan)
+        {
+          cur_read_block_idx_ = 0;
+          end_preread_block_idx_ = block_count_;
+        }
+        else
+        {
+          preread_block_idx_ = 0;
+          end_curread_block_idx_ = block_count_;
+        }
+
+        start = reverse_scan ? block_count_ - 1 : 0;
+        end   = reverse_scan ? 0 : block_count_;
+        if (block_count_ > 1)
+        {
+          //more than one block, each aio buffer read half of blocks
+          for (i = start; reverse_scan ? (i >= end) : (i < end);)
+          {
+            preread_size += block_[i].size_;
+            if (preread_size > total_size / AIO_BUFFER_COUNT)
+            {
+              if (!reverse_scan)
+              {
+                end_curread_block_idx_ = i;
+                preread_block_idx_ = i;
+              }
+              else
+              {
+                cur_read_block_idx_ = i + 1;
+                end_preread_block_idx_ = i + 1;
+              }
+              break;
+            }
+
+            //update index
+            reverse_scan ? (--i) : (++i);
+          }
+        }
+        else
+        {
+          //only one block, just use the current aio buffer to read
+          if (!reverse_scan)
+          {
+            end_curread_block_idx_ = block_count_;
+            preread_block_idx_ = block_count_;
+          }
+          else
+          {
+            cur_read_block_idx_ = 0;
+            end_preread_block_idx_ = 0;
+          }
+        }
+      }
+    }
+
+    void ObAIOBufferMgr::do_only_cur_aio_buf_assigned(
+      const bool check_cache, const bool reverse_scan)
+    {
+      int64_t i               = 0;
+      int64_t preread_size    = 0;
+      int64_t preread_buf_idx = (cur_buf_idx_ + 1) % AIO_BUFFER_COUNT;
+
+      if (check_cache && 0 == buffer_[preread_buf_idx].get_read_size() 
+          && preread_block_idx_ < block_count_)
+      {
+        /**
+         * current aio buffer is filled some block data, but preread aio 
+         * buffer is null, so preread aio buffer need read block data 
+         * from sstable file. the following code caculate the preread 
+         * block range if necessary. 
+         */
+        if (!reverse_scan && preread_block_idx_ < block_count_)
+        {
+          for (i = preread_block_idx_; i < block_count_; ++i)
+          {
+            preread_size += block_[i].size_;
+            if (!can_fit_aio_buffer(preread_size))
+            {
+              end_preread_block_idx_ = i;
+              break;
+            }
+          }
+
+          if (block_count_ == i)
+          {
+            end_preread_block_idx_ = block_count_;
+          }
+        }
+        else if (reverse_scan && preread_block_idx_ > 0)
+        {
+          for (i = preread_block_idx_ - 1; i >= 0; --i)
+          {
+            preread_size += block_[i].size_;
+            if (!can_fit_aio_buffer(preread_size))
+            {
+              preread_block_idx_ = i + 1; 
+              break;
+            }
+          }
+
+          if (i < 0)
+          {
+            preread_block_idx_ = 0;
+          }
+        }
+      }
+      else
+      {
+        /**
+         * blocks range of current aio buffer is assigned, but blocks 
+         * range of preread aio buffer isn't assigned. it means that the 
+         * total block size is less than 2M and greater than 1M. if 
+         * enable cache check, can't run into this path. for cache 
+         * check, this case is handled in for loop. 
+         */
+        if (!reverse_scan)
+        {
+          end_preread_block_idx_ = block_count_;
+        }
+        else
+        {
+          preread_block_idx_ = 0;
+        }
+      }
+    }
+
+    int ObAIOBufferMgr::internal_init_read_range(const bool read_cache,
+                                                 const bool reverse_scan)
+    {
+      int ret                   = OB_SUCCESS;
+      int64_t total_size        = 0;
+      int64_t preread_size      = 0;
+      bool cur_range_assign     = false;
+      bool preread_range_assign = false;
+      bool check_cache          = read_cache;
+      int32_t block_size        = -1;
+      int64_t i                 = 0;
+      int64_t start             = reverse_scan ? block_count_ - 1 : 0;
+      int64_t end               = reverse_scan ? 0 : block_count_;
+      int64_t preread_buf_idx   = (cur_buf_idx_ + 1) % AIO_BUFFER_COUNT;
+
+      ret = reset_both_aio_buffer();
 
       for (i = start; reverse_scan ? (i >= end) : (i < end) && OB_SUCCESS == ret;)
       {
@@ -743,157 +1130,40 @@ namespace oceanbase
         if (block_size == block_[i].size_)
         {
           total_size += block_size;
-          if (!cur_range_assign)
-          {
-            if (!can_fit_aio_buffer(total_size))
-            {
-              /**
-               * currnet aio buffer can't store all the data, asign the block 
-               * range of current aio buffer to read, and assign the start 
-               * block of preread 
-               */
-              if (!reverse_scan)
-              {
-                cur_read_block_idx_ = 0;
-                end_curread_block_idx_ = i;
-                preread_block_idx_ = i;
-              }
-              else
-              {
-                cur_read_block_idx_ = i + 1;
-                end_curread_block_idx_ = block_count_;
-                end_preread_block_idx_ = i + 1;
-              }
-              cur_range_assign = true;
-              ret = set_aio_buf_block_info(cur_buf_idx_, check_cache);
-            }
-            else if (check_cache)
-            {
-              //copy block to aio buffer from block cache
-              block_[i].cached_ = true;
-              ret = cur_aio_buf.put_cache_block(buffer_handle.get_buffer(), 
-                                                block_size, reverse_scan);
-            }
-          }
+          ret = cur_aio_buf_add_block(cur_range_assign, i, block_size, total_size,
+                                      check_cache, reverse_scan, buffer_handle);
   
-          if (OB_SUCCESS == ret && cur_range_assign && !preread_range_assign)
+          if (OB_SUCCESS == ret)
           {
-            preread_size += block_size;
-            if (!can_fit_aio_buffer(preread_size))
+            ret = preread_aio_buf_add_block(cur_range_assign, preread_range_assign,
+                                            i, block_size, preread_size, 
+                                            check_cache, reverse_scan, buffer_handle);
+            if (cur_range_assign && preread_range_assign)
             {
-              /**
-               * preread aio buffer is also can't store the left data, set the 
-               * end block of preread aio buffer. 
-               */
-              if (!reverse_scan)
-              {
-                end_preread_block_idx_ = i;
-              }
-              else
-              {
-                preread_block_idx_ = i + 1;
-              }
-              preread_range_assign = true;
-              ret = set_aio_buf_block_info(preread_buf_idx, check_cache);
-              if (check_cache && OB_SUCCESS == ret)
-              {
-                /**
-                 * copy block data from block and filled both aio buffer, next 
-                 * we also can read block from block cache 
-                 */
-                copy_from_cache_ = true;
-              }
               break;  //both aio buffer is full, break loop
-            }
-            else if (check_cache)
-            {
-              //copy block to aio buffer from block cache
-              block_[i].cached_ = true;
-              ret = preread_aio_buf.put_cache_block(buffer_handle.get_buffer(), 
-                                                    block_size, reverse_scan);
             }
           }
         }
-        else if (check_cache)
+        else if (check_cache) //get block from block cache 
         {
-          /**
-           * the first block not in block cache, we read the block and 
-           * follwing block from sstable file. so reset copy_from_cache_ 
-           * flag.
-           */
-          copy_from_cache_ = false;
-          cur_buf_read_size = cur_aio_buf.get_read_size();
-          preread_buf_read_size = preread_aio_buf.get_read_size();
-          if (!cur_range_assign && !preread_range_assign)
+          ret = do_first_block_noexist_in_cache(cur_range_assign, preread_range_assign,
+                                                check_cache, i, reverse_scan);
+          if (OB_CS_EAGAIN == ret)
           {
-            if (cur_buf_read_size == 0 && 0 == preread_buf_read_size)
-            {
-              //no block data in cache, try without check cache 
-              check_cache = false;
-              continue;
-            }
-            else if (cur_buf_read_size > 0 && 0 == preread_buf_read_size)
-            {
-              /**
-               * current aio buffer has blocks, preread aio buffer has no 
-               * block. if there is one block at least copied from cache, we 
-               * don't use this aio buffer to read block from sstable file 
-               * before the blocks are getten by user. 
-               */
-              if (!reverse_scan)
-              {
-                cur_read_block_idx_ = 0;
-                end_curread_block_idx_ = i;
-                preread_block_idx_ = i;
-              }
-              else
-              {
-                cur_read_block_idx_ = i + 1;
-                end_curread_block_idx_ = block_count_;
-                end_preread_block_idx_ = i + 1;
-              }
-              cur_range_assign = true;
-              ret = set_aio_buf_block_info(cur_buf_idx_, check_cache);
-            }
-            else
-            {
-              TBSYS_LOG(WARN, "unexpected stauts, cur_range_assign=%d, "
-                              "preread_range_assign=%d, cur_buf_read_size=%ld, "
-                              "preread_buf_read_size=%ld, block_index=%ld", 
-                        cur_range_assign, preread_range_assign, cur_buf_read_size,
-                        preread_buf_read_size, i);
-              ret = OB_ERROR;
-              break;
-            }
+            ret = OB_SUCCESS;
+            continue;
           }
-          else if (cur_range_assign && !preread_range_assign)
+          else
           {
-            //both aio buffer has blocks
-            if (cur_buf_read_size > 0 && preread_buf_read_size > 0)
-            {
-              if (!reverse_scan)
-              {
-                end_preread_block_idx_ = i;
-              }
-              else
-              {
-                preread_block_idx_ = i + 1;
-              }
-              preread_range_assign = true;
-              ret = set_aio_buf_block_info(preread_buf_idx, check_cache);
-            }
-            else
-            {
-              TBSYS_LOG(WARN, "unexpected stauts, cur_range_assign=%d, "
-                              "preread_range_assign=%d, cur_buf_read_size=%ld, "
-                              "preread_buf_read_size=%ld, block_index=%ld", 
-                        cur_range_assign, preread_range_assign, cur_buf_read_size,
-                        preread_buf_read_size, i);
-              ret = OB_ERROR;
-              break;
-            }
+            break;
           }
-          break;
+        }
+        else
+        {
+          TBSYS_LOG(WARN, "get block from block cache failed, block_size=%ld, "
+                          "block_[%ld].size_=%ld, check_cache=%d", 
+                    block_size, i, block_[i].size_, check_cache);
+          ret = OB_ERROR;
         }
 
         //update index
@@ -902,171 +1172,40 @@ namespace oceanbase
 
       if (OB_SUCCESS == ret)
       {
-        /**
-         * both blocks range of curret aio buffer and blocks range of 
-         * preread aio buffer aren't assigned. it means that total block 
-         * size is less than 1M. this path if only for no cache check.
-         */
-        if (!cur_range_assign && !preread_range_assign)
+        if (copy_from_cache_)
         {
-          //total blocks size is less than 512K, only use one aio buffer to read
-          if (total_size <= MIN_PREREAD_SIZE)
-          {
-            if (!reverse_scan)
-            {
-              cur_read_block_idx_ = 0;
-              end_curread_block_idx_ = block_count_;
-              preread_block_idx_ = block_count_;
-              end_preread_block_idx_ = block_count_;
-            }
-            else
-            {
-              cur_read_block_idx_ = 0;
-              end_curread_block_idx_ = block_count_;
-              preread_block_idx_ = 0;
-              end_preread_block_idx_ = 0;
-            }
-          }
-          else if (can_fit_aio_buffer(total_size))
-          {
-            /**
-             * if 512K < total_size < 1M, and there are more than 1 block, 
-             * use two aio buffer to read, each aio buffer read about half 
-             * of data. if there is only 1 block, use one aio buffer to 
-             * read. 
-             */
-            if (!reverse_scan)
-            {
-              cur_read_block_idx_ = 0;
-              end_preread_block_idx_ = block_count_;
-            }
-            else
-            {
-              preread_block_idx_ = 0;
-              end_curread_block_idx_ = block_count_;
-            }
-            preread_size = 0;
-            start = reverse_scan ? block_count_ - 1 : 0;
-            end   = reverse_scan ? 0 : block_count_;
-            if (block_count_ > 1)
-            {
-              //more than one block, each aio buffer read half of blocks
-              for (i = start; reverse_scan ? (i >= end) : (i < end);)
-              {
-                preread_size += block_[i].size_;
-                if (preread_size > total_size / AIO_BUFFER_COUNT)
-                {
-                  if (!reverse_scan)
-                  {
-                    end_curread_block_idx_ = i;
-                    preread_block_idx_ = i;
-                  }
-                  else
-                  {
-                    cur_read_block_idx_ = i + 1;
-                    end_preread_block_idx_ = i + 1;
-                  }
-                  break;
-                }
-
-                //update index
-                reverse_scan ? (--i) : (++i);
-              }
-            }
-            else
-            {
-              //only one block, just use the current aio buffer to read
-              if (!reverse_scan)
-              {
-                end_curread_block_idx_ = block_count_;
-                preread_block_idx_ = block_count_;
-              }
-              else
-              {
-                cur_read_block_idx_ = 0;
-                end_preread_block_idx_ = 0;
-              }
-            }
-          }
-        }
-        else if (cur_range_assign && !preread_range_assign)
-        {
-          if (check_cache && 0 == preread_aio_buf.get_read_size() 
-              && preread_block_idx_ < block_count_)
-          {
-            /**
-             * current aio buffer is filled some block data, but preread aio 
-             * buffer is null, so preread aio buffer need read block data 
-             * from sstable file. the following code caculate the preread 
-             * block range if necessary. 
-             */
-            if (!reverse_scan && preread_block_idx_ < block_count_)
-            {
-              for (i = preread_block_idx_; i < block_count_; ++i)
-              {
-                preread_size += block_[i].size_;
-                if (!can_fit_aio_buffer(preread_size))
-                {
-                  end_preread_block_idx_ = i;
-                  break;
-                }
-              }
-      
-              if (block_count_ == i)
-              {
-                end_preread_block_idx_ = block_count_;
-              }
-            }
-            else if (reverse_scan && preread_block_idx_ > 0)
-            {
-              for (i = preread_block_idx_ - 1; i >= 0; --i)
-              {
-                preread_size += block_[i].size_;
-                if (!can_fit_aio_buffer(preread_size))
-                {
-                  preread_block_idx_ = i + 1; 
-                  break;
-                }
-              }
-      
-              if (i < 0)
-              {
-                preread_block_idx_ = 0;
-              }
-            }
-          }
-          else
-          {
-            /**
-             * blocks range of current aio buffer is assigned, but blocks 
-             * range of preread aio buffer isn't assigned. it means that the 
-             * total block size is less than 2M and greater than 1M. if 
-             * enable cache check, can't run into this path. for cache 
-             * check, this case is handled in for loop. 
-             */
-            if (!reverse_scan)
-            {
-              end_preread_block_idx_ = block_count_;
-            }
-            else
-            {
-              preread_block_idx_ = 0;
-            }
-          }
+          ret = do_all_blocks_in_cache(cur_range_assign, preread_range_assign,
+                                       check_cache, reverse_scan);
         }
         else
         {
-          //both aio buffer read range are assigned, do nothing.
+          /**
+           * both blocks range of curret aio buffer and blocks range of 
+           * preread aio buffer aren't assigned. it means that total block 
+           * size is less than 1M. this path if only for no cache check.
+           */
+          if (!cur_range_assign && !preread_range_assign)
+          {
+            do_either_aio_buf_assigned(total_size, reverse_scan);
+          }
+          else if (cur_range_assign && !preread_range_assign)
+          {
+            do_only_cur_aio_buf_assigned(check_cache, reverse_scan);
+          }
+          else
+          {
+            //both aio buffer read range are assigned, do nothing.
+          }
         }
       }
 
       //failed to init range, reset aio buffer
       if (OB_SUCCESS != ret && OB_AIO_BUSY != ret)
       {
-        cur_aio_buf.reset();
-        cur_aio_buf.set_state(FREE);
-        preread_aio_buf.reset();
-        preread_aio_buf.set_state(FREE);
+        buffer_[cur_buf_idx_].reset();
+        buffer_[cur_buf_idx_].set_state(FREE);
+        buffer_[preread_buf_idx].reset();
+        buffer_[preread_buf_idx].set_state(FREE);
       }
 
       return ret;

@@ -273,8 +273,8 @@ void dump(int sig)
 }
 int main(int argc, char *argv[])
 {
-//char BUFFER[1024*1024*2];
-//setbuf(stderr, BUFFER);
+  //char BUFFER[1024*1024*2];
+  //setbuf(stderr, BUFFER);
   srand(time(NULL));
   signal(3, dump);
   signal(6, dump);

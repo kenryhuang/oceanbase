@@ -561,6 +561,60 @@ namespace oceanbase
       return ret;
     }
 
+    int ObRootLogWorker::set_ups_list(const common::ObUpsList &ups_list)
+    {
+      int ret = OB_SUCCESS;
+      int64_t pos = 0;
+      char* log_data = static_cast<char*>(ob_malloc(OB_MAX_PACKET_LENGTH));
+
+      if (NULL == log_data)
+      {
+        TBSYS_LOG(ERROR, "no memory");
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      }
+      else if (OB_SUCCESS != (ret = ups_list.serialize(log_data, OB_MAX_PACKET_LENGTH, pos)))
+      {
+        TBSYS_LOG(ERROR, "serialize error");
+      }
+      else
+      {
+        ret = flush_log(OB_RT_SET_UPS_LIST, log_data, pos);
+      }
+      if (NULL != log_data)
+      {
+        ob_free(log_data);
+        log_data = NULL;
+      }
+      return ret;
+    }
+    
+    int ObRootLogWorker::set_client_config(const common::ObClientConfig &client_conf)
+    {
+      int ret = OB_SUCCESS;
+      int64_t pos = 0;
+      char* log_data = static_cast<char*>(ob_malloc(OB_MAX_PACKET_LENGTH));
+
+      if (NULL == log_data)
+      {
+        TBSYS_LOG(ERROR, "no memory");
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      }
+      else if (OB_SUCCESS != (ret = client_conf.serialize(log_data, OB_MAX_PACKET_LENGTH, pos)))
+      {
+        TBSYS_LOG(ERROR, "serialize error");
+      }
+      else
+      {
+        ret = flush_log(OB_RT_SET_CLIENT_CONFIG, log_data, pos);
+      }
+      if (NULL != log_data)
+      {
+        ob_free(log_data);
+        log_data = NULL;
+      }
+      return ret;
+    }
+    
     int ObRootLogWorker::flush_log(const LogCommand cmd, const char* log_data, const int64_t& serialize_size)
     {
       int ret = OB_SUCCESS;
@@ -652,6 +706,12 @@ namespace oceanbase
           break;
         case OB_RT_SYNC_FROZEN_VERSION:
           ret = do_sync_frozen_version(log_data,data_len);
+          break;
+        case OB_RT_SET_UPS_LIST:
+          ret = do_set_ups_list(log_data, data_len);
+          break;
+        case OB_RT_SET_CLIENT_CONFIG:
+          ret = do_set_client_config(log_data, data_len);
           break;
         default:
           TBSYS_LOG(WARN, "unknow log command [%d]", cmd);
@@ -899,6 +959,10 @@ namespace oceanbase
       if (ret == OB_SUCCESS)
       {
         ret = root_server_->migrate_over(range, src_server, dest_server, keep_src, tablet_version);
+        if (OB_ENTRY_NOT_EXIST == ret)
+        {
+          ret = OB_SUCCESS;
+        }
       }
 
       return ret;
@@ -1213,7 +1277,38 @@ namespace oceanbase
       return ret;
     }
 
+    int ObRootLogWorker::do_set_ups_list(const char* log_data, const int64_t& log_length)
+    {
+      int ret = OB_SUCCESS;
+      int64_t pos = 0;
+      ObUpsList ups_list;
+      if (OB_SUCCESS != (ret = ups_list.deserialize(log_data, log_length, pos)))
+      {
+        TBSYS_LOG(ERROR, "deserialize error");
+      }
+      else
+      {
+        ret = root_server_->set_ups_list(ups_list);
+      }
+      return ret;
+    }
 
+    int ObRootLogWorker::do_set_client_config(const char* log_data, const int64_t& log_length)
+    {
+      int ret = OB_SUCCESS;
+      int64_t pos = 0;
+      ObClientConfig client_conf;
+      if (OB_SUCCESS != (ret = client_conf.deserialize(log_data, log_length, pos)))
+      {
+        TBSYS_LOG(ERROR, "deserialize error");
+      }
+      else
+      {
+        ret = root_server_->set_client_config(client_conf);
+      }
+      return ret;
+    }
+    
     void ObRootLogWorker::reset_cs_hb_time()
     {
       //int64_t now = tbsys::CTimeUtil::getTime();
@@ -1231,6 +1326,27 @@ namespace oceanbase
     {
       root_server_->worker_->stop();
     }
+
+
+uint64_t ObRootLogWorker::get_cur_log_file_id()
+{
+  uint64_t ret = 0;
+  if (NULL != log_manager_)
+  {
+    ret = log_manager_->get_cur_log_file_id();
+  }
+  return ret;
+}
+
+uint64_t ObRootLogWorker::get_cur_log_seq()
+{
+  uint64_t ret = 0;
+  if (NULL != log_manager_)
+  {
+    ret = log_manager_->get_cur_log_seq();
+  }
+  return ret;
+}
 
   } /* rootserver */
 } /* oceanbase */

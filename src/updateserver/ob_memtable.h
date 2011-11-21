@@ -158,6 +158,7 @@ namespace oceanbase
         int get(MemTableTransHandle &handle,
                 const uint64_t table_id, const common::ObString &row_key,
                 MemTableIterator &iterator,
+                bool &is_multi_update,
                 ColumnFilter *column_filter = NULL);
 
         // 传入需要判断的get param

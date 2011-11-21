@@ -14,6 +14,7 @@
  *
  */
 #include "common/ob_trace_log.h"
+#include "common/ob_row_compaction.h"
 #include "ob_update_server_main.h"
 #include "ob_ups_table_mgr.h"
 
@@ -24,7 +25,8 @@ namespace oceanbase
     using namespace oceanbase::common;
 
     ObUpsTableMgr :: ObUpsTableMgr() : log_buffer_(NULL),
-                                       check_checksum_(false)
+                                       check_checksum_(false),
+                                       has_started_(false)
     {
     }
 
@@ -207,7 +209,6 @@ namespace oceanbase
         freeze_param.param.op_flag = 0;
         
         ups_mutator.set_freeze_memtable();
-        int64_t serialize_size = 0;
         if (NULL == ups_main)
         {
           TBSYS_LOG(ERROR, "get updateserver main null pointer");
@@ -227,7 +228,6 @@ namespace oceanbase
         }
         else
         {
-          ObUpsLogMgr& log_mgr = ups_main->get_update_server().get_log_mgr();
           ObString str_freeze_param;
           str_freeze_param.assign_ptr(out_buff.get_data(), out_buff.get_position());
           mutator_cell_info.cell_info.value_.set_varchar(str_freeze_param);
@@ -235,27 +235,9 @@ namespace oceanbase
           {
             TBSYS_LOG(WARN, "add cell to ups_mutator fail ret=%d", ret);
           }
-          else if (NULL == log_buffer_)
-          {
-            TBSYS_LOG(WARN, "log buffer malloc fail");
-            ret = OB_ERROR;
-          }
-          else if (OB_SUCCESS != (ret = ups_mutator.serialize(log_buffer_, LOG_BUFFER_SIZE, serialize_size)))
-          {
-            TBSYS_LOG(WARN, "ups_mutator serialilze fail log_buffer=%p log_buffer_size=%ld serialize_size=%ld ret=%d",
-                      log_buffer_, LOG_BUFFER_SIZE, serialize_size, ret);
-          }
-          else if (OB_SUCCESS != (ret = log_mgr.write_log(OB_LOG_UPS_MUTATOR, log_buffer_, serialize_size)))
-          {
-            TBSYS_LOG(WARN, "write log fail log_buffer_=%p serialize_size=%ld ret=%d", log_buffer_, serialize_size, ret);
-          }
-          else if (OB_SUCCESS != (ret = log_mgr.flush_log()))
-          {
-            TBSYS_LOG(WARN, "flush log fail ret=%d", ret);
-          }
           else
           {
-            // do nothing
+            ret = flush_obj_to_log(OB_LOG_UPS_MUTATOR, ups_mutator);
           }
         }
         TBSYS_LOG(INFO, "write freeze_op log ret=%d new_version=%lu frozen_version=%lu new_log_file_id=%lu op_flag=%lx",
@@ -340,6 +322,7 @@ namespace oceanbase
 
       if (OB_SUCCESS == ret)
       {
+        bool major_version_changed = false;
         switch (header->version)
         {
           // 回放旧日志中的freeze操作
@@ -355,6 +338,7 @@ namespace oceanbase
               new_sst_id.minor_version_end = SSTableID::START_MINOR_VERSION;
               frozen_sst_id = new_sst_id;
               frozen_sst_id.major_version -= 1;
+              major_version_changed = true;
               ret = table_mgr_.replay_freeze_memtable(new_sst_id.id, frozen_sst_id.id, new_log_file_id);
               TBSYS_LOG(INFO, "replay freeze memtable using freeze_param_v1 active_version=%ld new_log_file_id=%ld op_flag=%lx ret=%d",
                         freeze_param_v1->active_version, freeze_param_v1->new_log_file_id, freeze_param_v1->op_flag, ret);
@@ -381,6 +365,10 @@ namespace oceanbase
                 {
                   SSTableID sst_id_new = new_version;
                   SSTableID sst_id_frozen = frozen_version;
+                  if (sst_id_new.major_version != sst_id_frozen.major_version)
+                  {
+                    major_version_changed = true;
+                  }
                 }
               }
               TBSYS_LOG(INFO, "replay freeze memtable using freeze_param_v2 active_version=%ld new_log_file_id=%ld op_flag=%lx ret=%d",
@@ -409,6 +397,10 @@ namespace oceanbase
                 {
                   SSTableID sst_id_new = new_version;
                   SSTableID sst_id_frozen = frozen_version;
+                  if (sst_id_new.major_version != sst_id_frozen.major_version)
+                  {
+                    major_version_changed = true;
+                  }
                 }
               }
               TBSYS_LOG(INFO, "replay freeze memtable using freeze_param_v3 active_version=%ld new_log_file_id=%ld op_flag=%lx ret=%d",
@@ -430,6 +422,10 @@ namespace oceanbase
           }
           else
           {
+            if (major_version_changed)
+            {
+              ups_main->get_update_server().submit_report_freeze();
+            }
             ups_main->get_update_server().submit_handle_frozen();
           }
         }
@@ -444,15 +440,98 @@ namespace oceanbase
       int ret = OB_SUCCESS;
       if (ups_mutator.is_freeze_memtable())
       {
+        has_started_ = true;
         ret = handle_freeze_log_(ups_mutator);
       }
       else if (ups_mutator.is_drop_memtable())
       {
         TBSYS_LOG(INFO, "ignore drop commit log");
       }
+      else if (ups_mutator.is_first_start())
+      {
+        has_started_ = true;
+        ObUpdateServerMain *main = ObUpdateServerMain::get_instance();
+        if (NULL == main)
+        {
+          TBSYS_LOG(ERROR, "get updateserver main null pointer");
+        }
+        else
+        {
+          table_mgr_.sstable_scan_finished(main->get_update_server().get_param().get_minor_num_limit());
+        }
+        TBSYS_LOG(INFO, "handle first start flag log");
+      }
       else
       {
+        INC_STAT_INFO(UPS_STAT_APPLY_COUNT, 1);
         ret = set_mutator_(ups_mutator);
+      }
+      return ret;
+    }
+
+    template <typename T>
+    int ObUpsTableMgr :: flush_obj_to_log(const LogCommand log_command, T &obj)
+    {
+      int ret = OB_SUCCESS;
+      ObUpdateServerMain *ups_main = ObUpdateServerMain::get_instance();
+      if (NULL == ups_main)
+      {
+        TBSYS_LOG(ERROR, "get updateserver main null pointer");
+        ret = OB_ERROR;
+      }
+      else
+      {
+        ObUpsLogMgr& log_mgr = ups_main->get_update_server().get_log_mgr();
+        int64_t serialize_size = 0;
+        if (NULL == log_buffer_)
+        {
+          TBSYS_LOG(WARN, "log buffer malloc fail");
+          ret = OB_ERROR;
+        }
+        else if (OB_SUCCESS != (ret = ups_serialize(obj, log_buffer_, LOG_BUFFER_SIZE, serialize_size)))
+        {
+          TBSYS_LOG(WARN, "obj serialilze fail log_buffer=%p log_buffer_size=%ld serialize_size=%ld ret=%d",
+                    log_buffer_, LOG_BUFFER_SIZE, serialize_size, ret);
+        }
+        else
+        {
+          if (OB_SUCCESS != (ret = log_mgr.write_log(log_command, log_buffer_, serialize_size)))
+          {
+            TBSYS_LOG(WARN, "write log fail log_command=%d log_buffer_=%p serialize_size=%ld ret=%d",
+                      log_command, log_buffer_, serialize_size, ret);
+          }
+          else if (OB_SUCCESS != (ret = log_mgr.flush_log()))
+          {
+            TBSYS_LOG(WARN, "flush log fail ret=%d", ret);
+          }
+          else
+          {
+            // do nothing
+          }
+          if (OB_SUCCESS != ret)
+          {
+            TBSYS_LOG(WARN, "write log fail ret=%d, will kill self", ret);
+            kill(getpid(), SIGTERM);
+            ret = OB_RESPONSE_TIME_OUT;
+          }
+        }
+      }
+      return ret;
+    }
+
+    int ObUpsTableMgr :: write_start_log()
+    {
+      int ret = OB_SUCCESS;
+      if (has_started_)
+      {
+        TBSYS_LOG(INFO, "system has started need not write start flag");
+      }
+      else
+      {
+        ObUpsMutator ups_mutator;
+        ups_mutator.set_first_start();
+        ret = flush_obj_to_log(OB_LOG_UPS_MUTATOR, ups_mutator);
+        TBSYS_LOG(INFO, "write first start flag ret=%d", ret);
       }
       return ret;
     }
@@ -818,6 +897,7 @@ namespace oceanbase
                       table_list->size());
 
         ObMerger merger;
+        bool is_multi_update = false;
         merger.set_asc(scan_param.get_scan_direction() == ObScanParam::FORWARD);
         TableList::iterator iter;
         int64_t index = 0;
@@ -854,6 +934,7 @@ namespace oceanbase
             TBSYS_LOG(WARN, "add iterator to merger fail ret=%d scan_range=%s", ret, scan_range2str(*scan_range));
             break;
           }
+          is_multi_update |= table_utils->get_table_iter().is_multi_update();
           sst_id = (NULL == table_entity) ? 0 : table_entity->get_table_item().get_sstable_id();
           FILL_TRACE_LOG("scan table %s ret=%d", sst_id.log_str(), ret);
         }
@@ -861,7 +942,7 @@ namespace oceanbase
         if (OB_SUCCESS == ret)
         {
           int64_t row_count = 0;
-          ret = add_to_scanner_(merger, scanner, row_count, start_time, timeout);
+          ret = add_to_scanner_(merger, scanner, is_multi_update, row_count, start_time, timeout);
           FILL_TRACE_LOG("add to scanner scanner_size=%ld row_count=%ld ret=%d", scanner.get_size(), row_count, ret);
           if (OB_SIZE_OVERFLOW == ret)
           {
@@ -1037,6 +1118,7 @@ namespace oceanbase
       else
       {
         ObMerger merger;
+        bool is_multi_update = false;
         uint64_t table_id = cell->table_id_;
         ObString row_key = cell->row_key_;
         column_filter->clear();
@@ -1077,6 +1159,7 @@ namespace oceanbase
             TBSYS_LOG(WARN, "add iterator to merger fail ret=%d", ret);
             break;
           }
+          is_multi_update |= table_utils->get_table_iter().is_multi_update();
           TBSYS_LOG(DEBUG, "get row row_key=[%s] row_key_ptr=%p columns=[%s] iter=%p",
                     print_string(row_key), row_key.ptr(), column_filter->log_str(), &(table_utils->get_table_iter()));
         }
@@ -1084,7 +1167,7 @@ namespace oceanbase
         if (OB_SUCCESS == ret)
         {
           int64_t row_count = 0;
-          ret = add_to_scanner_(merger, scanner, row_count, start_time, timeout);
+          ret = add_to_scanner_(merger, scanner, is_multi_update, row_count, start_time, timeout);
           if (OB_SIZE_OVERFLOW == ret)
           {
             // return ret
@@ -1104,7 +1187,7 @@ namespace oceanbase
       return ret;
     }
 
-    int ObUpsTableMgr :: add_to_scanner_(ObMerger& ups_merger, ObScanner& scanner, int64_t& row_count,
+    int ObUpsTableMgr :: add_to_scanner_(ObMerger& ups_merger, ObScanner& scanner, const bool is_multi_update, int64_t& row_count,
                                         const int64_t start_time, const int64_t timeout)
     {
       int err = OB_SUCCESS;
@@ -1112,9 +1195,27 @@ namespace oceanbase
       ObCellInfo* cell = NULL;
       bool is_row_changed = false;
       row_count = 0;
-      while (OB_SUCCESS == err && (OB_SUCCESS == (err = ups_merger.next_cell())))
+      ObRowCompaction *row_compaction = GET_TSI(ObRowCompaction);
+      ObIterator *iter = NULL;
+      if (NULL == row_compaction)
       {
-        err = ups_merger.get_cell(&cell, &is_row_changed);
+        TBSYS_LOG(WARN, "get tsi row_compaction fail");
+        iter = &ups_merger;
+      }
+      else if (!is_multi_update)
+      {
+        iter = &ups_merger;
+      }
+      else
+      {
+        row_compaction->set_iterator(&ups_merger);
+        iter = row_compaction;
+      }
+      while (OB_SUCCESS == err && (OB_SUCCESS == (err = iter->next_cell())))
+      //while (OB_SUCCESS == err && (OB_SUCCESS == (err = ups_merger.next_cell())))
+      {
+        err = iter->get_cell(&cell, &is_row_changed);
+        //err = ups_merger.get_cell(&cell, &is_row_changed);
         if (OB_SUCCESS != err || NULL == cell)
         {
           TBSYS_LOG(WARN, "failed to get cell, err=%d", err);
@@ -1405,6 +1506,11 @@ namespace oceanbase
       {
         ups_main->get_update_server().get_sstable_mgr().log_sstable_info();
       }
+    }
+
+    void ObUpsTableMgr::set_warm_up_percent(const int64_t warm_up_percent)
+    {
+      table_mgr_.set_warm_up_percent(warm_up_percent);
     }
 
     bool get_key_prefix(const TEKey &te_key, TEKey &prefix_key)

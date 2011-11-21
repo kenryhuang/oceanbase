@@ -12,6 +12,10 @@ LDADD = $(top_builddir)/src/sstable/libsstable.a \
 		${TBLIB_ROOT}/lib/libtbsys.a 
 
 AM_LDFLAGS = -lnuma -lpthread -lc -lm -lrt -ldl -laio 
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_LIBRARIES = libchunkserver.a
 libchunkserver_a_SOURCES = ob_chunk_server.cpp \
@@ -57,3 +61,5 @@ EXTRA_DIST = \
 
 pkgdata_data_DATA=chunkserver.conf.template
 pkgdata_datadir=${prefix}/etc
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

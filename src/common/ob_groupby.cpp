@@ -720,10 +720,6 @@ int oceanbase::common::ObGroupByParam::aggregate(const ObCellArray & org_cells, 
         {
           TBSYS_LOG(WARN,"fail to append group by columns into aggregate cell array [err:%d]", err);
         }
-        else
-        {
-          cell_out->row_key_.assign(NULL,0);
-        }
       }
     }
 
@@ -742,14 +738,11 @@ int oceanbase::common::ObGroupByParam::aggregate(const ObCellArray & org_cells, 
         {
           TBSYS_LOG(WARN,"fail to append return columns into aggregate cell array [err:%d]", err);
         }
-        else
-        {
-          cell_out->row_key_.assign(NULL,0);
-        }
       }
     }
 
     ObCellInfo first_agg_cell;
+    first_agg_cell = org_cells[org_row_beg]; 
     for (int64_t i = 0; OB_SUCCESS == err && i < aggregate_columns_.get_array_index(); i++)
     {
       if (aggregate_columns_.at(i)->get_org_column_idx() > max_org_idx)
@@ -772,10 +765,6 @@ int oceanbase::common::ObGroupByParam::aggregate(const ObCellArray & org_cells, 
           if (OB_SUCCESS != err)
           {
             TBSYS_LOG(WARN,"fail to append aggregate columns into aggregate cell array [err:%d]", err);
-          }
-          else
-          {
-            cell_out->row_key_.assign(NULL,0);
           }
         }
       }
@@ -1488,6 +1477,7 @@ int  oceanbase::common::ObGroupByParam::get_aggregate_column_name(const int64_t 
   if (column_idx < 0 || column_idx >= column_num_)
   {
     TBSYS_LOG(WARN,"agument error [column_idx:%ld,column_num_:%ld]", column_idx, column_num_);
+    err  = OB_ARRAY_OUT_OF_RANGE;
   }
   if (OB_SUCCESS == err)
   {

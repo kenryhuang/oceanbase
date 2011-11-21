@@ -44,12 +44,20 @@ namespace
   const char* OBCS_MERGE_THRESHOLD_LOAD_HIGH = "merge_load_threshold_high";
   const char* OBCS_MERGE_THRESHOLD_REQUEST_HIGH = "merge_threshold_request_high";
   const char* OBCS_MERGE_DELAY_INTERVAL_MINUTES = "merge_delay_interval_minutes";
-  const char* OBCS_MAX_MERGE_DURATION_MINUTES = "max_merge_duration_minutes";
+  const char* OBCS_MERGE_DELAY_FOR_LSYNC_SECOND = "merge_delay_for_lsync_second";
+  const char* OBCS_MERGE_SCAN_USE_PREREAD = "merge_scan_use_preread";
   const char* OBCS_MIN_MERGE_INTERVAL_SECOND = "min_merge_interval_second";
   const char* OBCS_MIN_DROP_CACHE_WAIT_SECOND = "min_drop_cache_wait_second";
   const char* OBCS_MERGE_TIMEOUT = "merge_timeout";
+  const char* OBCS_MERGE_PAUSE_ROW_COUNT = "merge_pause_row_count";
+  const char* OBCS_MERGE_PAUSE_SLEEP_TIME = "merge_pause_sleep_time_us";
+  const char* OBCS_MERGE_HIGHLOAD_SLEEP_TIME = "merge_high_load_sleep_time_us";
+
   const char* OBCS_MERGE_ADJUST_RATIO= "merge_adjust_ratio";
   const char* OBCS_MAX_VERSION_GAP = "max_version_gap";
+  const char* OBCS_FETCH_UPSLIST_INTERVAL = "upslist_interval_us";
+  const char* OBCS_TASK_LEFT_TIME = "task_left_time_us";
+  const char* OBCS_WRITE_SSTABLE_IO_TYPE = "write_sstable_io_type";
 
   const char* OBRS_SECTION = "root_server";
   const char* OBRS_IP = "vip";
@@ -65,6 +73,13 @@ namespace
   const int64_t FICACHE_MAX_CACHE_NUM = 4096L;
   const int64_t BICACHE_MEMSIZE = 512L;
   const int64_t JCACHE_MEMSIZE = 512L;
+
+  const int64_t DEFAULT_MERGE_DELAY_FOR_LSYNC = 60; // 60 seconds
+  const int64_t DEFAULT_MERGE_SCAN_USE_PREREAD = 1;
+  const int64_t DEFAULT_MERGE_PAUSE_ROW_COUNT = 2000;
+  const int64_t DEFAULT_MERGE_PAUSE_SLEEP_TIME = 0; //  donot pause merge;
+  const int64_t DEFAULT_MERGE_HIGHLOAD_SLEEP_TIME = 2 * 1000 * 1000L; // 2 seconds  
+
 }
 
 using namespace oceanbase::common;
@@ -229,7 +244,7 @@ namespace oceanbase
       if (OB_SUCCESS == ret)
       {
         retry_times_ = TBSYS_CONFIG.getInt(OBCS_SECTION,OBCS_RETRY_TIMES,3);
-        if (retry_times_ < 0)
+        if (retry_times_ <= 0)
         {
           TBSYS_LOG(WARN,"chunkserver retry times (%d) cannot < 0",retry_times_);
           ret = OB_INVALID_ARGUMENT;
@@ -239,7 +254,7 @@ namespace oceanbase
       if (OB_SUCCESS == ret)
       {
         reserve_sstable_copy_ = TBSYS_CONFIG.getInt(OBCS_SECTION,OBCS_RESERVE_SSTABLE_COPY,3);
-        if (reserve_sstable_copy_ < 0)
+        if (reserve_sstable_copy_ <= 0)
         {
           TBSYS_LOG(WARN,"chunkserver reserver_sstable_copy_ (%d) can't < 0",reserve_sstable_copy_);
           ret = OB_INVALID_ARGUMENT;
@@ -249,9 +264,9 @@ namespace oceanbase
       if (OB_SUCCESS == ret)
       {
         network_time_out_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_NETWORK_TIMEOUT, 2000 * 1000);
-        if (network_time_out_ <= 0)
+        if (network_time_out_ <= 100 * 1000L) // at least 100ms
         {
-          TBSYS_LOG(ERROR, "chunkserver network timeout (%ld) cannot <= 0." ,
+          TBSYS_LOG(ERROR, "chunkserver network timeout (%ld) cannot <= 100,000." ,
               network_time_out_);
           ret = OB_INVALID_ARGUMENT;
         }
@@ -358,18 +373,30 @@ namespace oceanbase
           merge_delay_interval_ = (10 * 60L * 60 * 1000 * 1000);
         }
       }
-      
+
       if (OB_SUCCESS == ret)
       {
-        max_merge_duration_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_MAX_MERGE_DURATION_MINUTES,480);
-        max_merge_duration_ *= (60L * 60 * 1000 * 1000 ); //minutes to us
-        if (max_merge_duration_ <= 0)
+        merge_delay_for_lsync_ = TBSYS_CONFIG.getInt(OBCS_SECTION, 
+            OBCS_MERGE_DELAY_FOR_LSYNC_SECOND, DEFAULT_MERGE_DELAY_FOR_LSYNC);
+        merge_delay_for_lsync_ *= (1000 * 1000L);
+        if (merge_delay_for_lsync_ <= 0)
         {
-          TBSYS_LOG(WARN,"max_merge_duration_ (%ld) cann't <= 0,set it to 480 minutes(8hours)",max_merge_duration_);
-          max_merge_duration_ = (480 * 60L * 60 * 1000 * 1000);
+          TBSYS_LOG(WARN,"merge_delay_for_lsync_ (%ld) cann't <= 0,set it to 1 minutes", merge_delay_for_lsync_);
+          merge_delay_for_lsync_ = DEFAULT_MERGE_DELAY_FOR_LSYNC * 1000 * 1000L;
         }
       }
 
+      if (OB_SUCCESS == ret)
+      {
+        merge_scan_use_preread_ = TBSYS_CONFIG.getInt(OBCS_SECTION, 
+            OBCS_MERGE_SCAN_USE_PREREAD, DEFAULT_MERGE_SCAN_USE_PREREAD);
+        if (merge_scan_use_preread_ != 0 && merge_scan_use_preread_ != 1)
+        {
+          TBSYS_LOG(WARN,"merge_scan_use_preread_ (%ld) not 0 or 1", merge_scan_use_preread_);
+          merge_scan_use_preread_ = DEFAULT_MERGE_SCAN_USE_PREREAD;
+        }
+      }
+      
       if (OB_SUCCESS == ret)
       {
         merge_timeout_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_MERGE_TIMEOUT,3000000);
@@ -381,19 +408,57 @@ namespace oceanbase
 
       if (OB_SUCCESS == ret)
       {
-        merge_adjust_ratio_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_MERGE_ADJUST_RATIO,80);
-        if (merge_adjust_ratio_ <= 0)
+        merge_pause_row_count_ = TBSYS_CONFIG.getInt(OBCS_SECTION, 
+            OBCS_MERGE_PAUSE_ROW_COUNT, DEFAULT_MERGE_PAUSE_ROW_COUNT);
+        if (merge_pause_row_count_ <= 0)
         {
-          TBSYS_LOG(WARN,"merge_adjust_ratio_(%ld) cann't <= 0,set it to 80",merge_adjust_ratio_);
+          TBSYS_LOG(WARN,"merge_pause_row_count_ (%ld) cann't <= 0,set it to %ld",
+              merge_pause_row_count_, DEFAULT_MERGE_PAUSE_ROW_COUNT);
+          merge_pause_row_count_ = DEFAULT_MERGE_PAUSE_ROW_COUNT;
         }
       }
 
       if (OB_SUCCESS == ret)
       {
-        max_version_gap_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_MAX_VERSION_GAP,3);
+        merge_pause_sleep_time_ = TBSYS_CONFIG.getInt(OBCS_SECTION, 
+            OBCS_MERGE_PAUSE_SLEEP_TIME, DEFAULT_MERGE_PAUSE_SLEEP_TIME);
+        if (merge_pause_sleep_time_ < 0)
+        {
+          TBSYS_LOG(WARN,"merge_pause_sleep_time_ (%ld) cann't < 0,set it to %ld",
+              merge_pause_sleep_time_, DEFAULT_MERGE_PAUSE_SLEEP_TIME);
+          merge_pause_sleep_time_ = DEFAULT_MERGE_PAUSE_SLEEP_TIME;
+        }
+      }
+
+      if (OB_SUCCESS == ret)
+      {
+        merge_highload_sleep_time_ = TBSYS_CONFIG.getInt(OBCS_SECTION, 
+            OBCS_MERGE_HIGHLOAD_SLEEP_TIME, DEFAULT_MERGE_HIGHLOAD_SLEEP_TIME);
+        if (merge_highload_sleep_time_ <= 0)
+        {
+          TBSYS_LOG(WARN,"merge_highload_sleep_time_ (%ld) cann't <= 0,set it to %ld",
+              merge_highload_sleep_time_, DEFAULT_MERGE_HIGHLOAD_SLEEP_TIME);
+          merge_highload_sleep_time_ = DEFAULT_MERGE_HIGHLOAD_SLEEP_TIME;
+        }
+      }
+
+      if (OB_SUCCESS == ret)
+      {
+        merge_adjust_ratio_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_MERGE_ADJUST_RATIO, 80);
+        if (merge_adjust_ratio_ <= 0)
+        {
+          TBSYS_LOG(WARN,"merge_adjust_ratio_(%ld) cann't <= 0,set it to 80",merge_adjust_ratio_);
+          merge_adjust_ratio_ = 80;
+        }
+      }
+
+      if (OB_SUCCESS == ret)
+      {
+        max_version_gap_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_MAX_VERSION_GAP, 3);
         if (max_version_gap_ <= 0)
         {
           TBSYS_LOG(WARN,"max_version_gap_(%ld) cann't <= 0,set if to default(3)");
+          max_version_gap_ = 3;
         }
       }
 
@@ -423,6 +488,36 @@ namespace oceanbase
 
       if (OB_SUCCESS == ret)
       {
+        fetch_ups_interval_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_FETCH_UPSLIST_INTERVAL, 60 * 1000 * 1000L);
+        if (fetch_ups_interval_ <= 0)
+        {
+          TBSYS_LOG(ERROR, "fetch ups list interval time must > 0, got (%ld)", fetch_ups_interval_);
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+
+      if (ret == OB_SUCCESS)
+      {
+        task_left_time_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_TASK_LEFT_TIME, 300 * 1000);
+        if (task_left_time_ < 0)
+        {
+          TBSYS_LOG(ERROR, "task left time must >= 0, got (%d)", task_left_time_);
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+
+      if (ret == OB_SUCCESS)
+      {
+        write_sstable_io_type_ = TBSYS_CONFIG.getInt(OBCS_SECTION, OBCS_WRITE_SSTABLE_IO_TYPE, 0);
+        if (write_sstable_io_type_ < 0)
+        {
+          TBSYS_LOG(ERROR, "write sstable io type must >= 0, got (%d)", write_sstable_io_type_);
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+
+      if (OB_SUCCESS == ret)
+      {
         bc_conf_.block_cache_memsize_mb = TBSYS_CONFIG.getInt(
             OB_CACHE_SECTION, OBCE_BLOCKCACHE_MEMSIZE_MB, 
             BLOCKCACHE_MEMSIZE_MB);
@@ -447,6 +542,67 @@ namespace oceanbase
       return ret;
 
     }
+
+#define CHANGE_CONFIG_ITEM_INT_TYPE(int_type, item_name, item_var, unit_multiple, illegal_pred) \
+    do \
+    { \
+      if (OB_SUCCESS == ret) \
+      { \
+        int_type newval = config.getInt(OBCS_SECTION, item_name, item_var / unit_multiple); \
+        newval *= unit_multiple; \
+        if (illegal_pred)  \
+        { \
+          TBSYS_LOG(WARN, "reload conf %s (%ld) is invalid %s", #item_var, newval, #illegal_pred); \
+        } \
+        else if (newval != item_var) \
+        { \
+          TBSYS_LOG(INFO, "reload conf %s switch (%ld) to (%ld)", #item_var, item_var, newval); \
+          item_var = newval; \
+        } \
+      } \
+    }  while(0);
+
+    int ObChunkServerParam::reload_from_config(const char* config_file_name)
+    {
+      int ret = OB_SUCCESS;
+
+      tbsys::CConfig config;
+      if(config.load(config_file_name)) 
+      {
+        fprintf(stderr, "load file %s error\n", config_file_name);
+        ret = OB_ERROR;
+      }
+
+      CHANGE_CONFIG_ITEM_INT_TYPE(int32_t, OBCS_RETRY_TIMES, retry_times_, 1, (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_NETWORK_TIMEOUT, network_time_out_, 1, (newval < 100 * 1000L));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_RSYNC_BAND_LIMIT, rsync_band_limit_, 1, (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_MEM_LIMIT, merge_mem_limit_, 1, (newval < 1 * 1024 * 1024L));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_THRESHOLD_LOAD_HIGH, merge_threshold_load_high_, 1, (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_THRESHOLD_REQUEST_HIGH, merge_threshold_request_high_, 1, (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_DELAY_INTERVAL_MINUTES, merge_delay_interval_, 
+          (60*60*1000*1000L), (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_DELAY_FOR_LSYNC_SECOND, merge_delay_for_lsync_, 
+          (1000*1000L), (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_SCAN_USE_PREREAD, merge_scan_use_preread_, 
+          1, (newval != 0 && newval != 1));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_TIMEOUT, merge_timeout_, 1, (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_ADJUST_RATIO, merge_adjust_ratio_, 1, (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MIN_MERGE_INTERVAL_SECOND, min_merge_interval_, 
+          (1000 * 1000L), (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MIN_DROP_CACHE_WAIT_SECOND, min_drop_cache_wait_time_, 
+          (1000 * 1000L), (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_FETCH_UPSLIST_INTERVAL, fetch_ups_interval_, 1, (newval <= 0));
+
+      CHANGE_CONFIG_ITEM_INT_TYPE(int32_t, OBCS_TASK_QUEUE_SIZE, task_queue_size_, 1, (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_TASK_LEFT_TIME, task_left_time_, 1, (newval < 0));
+
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_PAUSE_ROW_COUNT, merge_pause_row_count_, 1, (newval <= 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_PAUSE_SLEEP_TIME, merge_pause_sleep_time_, 1, (newval < 0));
+      CHANGE_CONFIG_ITEM_INT_TYPE(int64_t, OBCS_MERGE_HIGHLOAD_SLEEP_TIME, merge_highload_sleep_time_, 1, (newval <= 0));
+
+      return ret;
+    }
+
   } // end namespace chunkserver
 } // end namespace oceanbase
 

@@ -470,7 +470,11 @@ int RpcStub::get_version(const ObServer & server, const int64_t timeout, int64_t
     ret = serialization::decode_vi64(data_buff.get_data(), data_buff.get_position(), pos, &version);
     if (ret != OB_SUCCESS)
     {
-      TBSYS_LOG(ERROR, "decode memtable version failed:ret[%d]", ret);
+      TBSYS_LOG(ERROR, "decode last frozen memtable version failed:ret[%d]", ret);
+    }
+    else
+    {
+      TBSYS_LOG(DEBUG, "get frozen version succ:version[%ld]", version);
     }
   }
   return ret;

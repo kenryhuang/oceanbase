@@ -160,10 +160,12 @@ namespace oceanbase
         {
           if (p_r1 == NULL)
           {
+            TBSYS_LOG(WARN, "no tablet info, idx=%d", r1);
             ret = -1;
           }
           else if (p_r2 == NULL)
           {
+            TBSYS_LOG(WARN, "no tablet info, idx=%d", r2);
             ret = 1;
           }
           else 
@@ -171,6 +173,10 @@ namespace oceanbase
             ret = p_r1->range_.compare_with_endkey(p_r2->range_);
           }
         }
+      }
+      else
+      {
+        TBSYS_LOG(WARN, "NULL info manager");
       }
       return ret;
     }

@@ -343,6 +343,8 @@ namespace oceanbase
         int serialize(const int32_t index, const int32_t disk_no, char* buf, const int64_t buf_len, int64_t &pos);
         int deserialize(const int32_t disk_no, const char* buf, const int64_t buf_len, int64_t &pos);
 
+        common::IFileInfoMgr& get_fileinfo_cache() const { return fileinfo_cache_; }
+
 
       private:
         int64_t get_eldest_index() const;

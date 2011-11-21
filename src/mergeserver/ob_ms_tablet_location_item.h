@@ -43,34 +43,48 @@ namespace oceanbase
 
       /// add a tablet location to item list
       int add(const common::ObTabletLocation & location);
+
       /// del the index pos TabletLocation
       int del(const int64_t index, ObMergerTabletLocation & location);
+
       /// set item invalid status
       int set_item_invalid(const ObMergerTabletLocation & location);
-      /// operator random access 
+
+      /// set item valid status
+      void set_item_valid(const int64_t timestamp);
+
+      /// get valid item count
+      int64_t get_valid_count(void) const;
+
+      /// operator random access
       ObMergerTabletLocation & operator[] (const uint64_t index);
+
       /// sort the server list
-      int sort(const common::ObServer & server); 
+      int sort(const common::ObServer & server);
+
       /// current tablet locastion server count 
       int64_t size(void) const;
-      /// clear all items 
+
+      /// clear all items
       void clear(void);
+
       /// get modify timestamp
       int64_t get_timestamp(void) const;
       /// set timestamp
       void set_timestamp(const int64_t timestamp);
+
       /// dump all info
       void print_info(void) const;
-       
+
       /// serailize or deserialization
       NEED_SERIALIZE_AND_DESERIALIZE;
-    
+
     private:
       int64_t cur_count_;
       int64_t timestamp_;
       ObMergerTabletLocation locations_[MAX_REPLICA_COUNT];
     };
-    
+
     inline int64_t ObMergerTabletLocationList::size(void) const
     {
       return cur_count_;
@@ -81,7 +95,7 @@ namespace oceanbase
       timestamp_ = 0;
       cur_count_ = 0;
     }
-    
+
     inline int64_t ObMergerTabletLocationList::get_timestamp(void) const
     {
       return timestamp_;
@@ -91,14 +105,13 @@ namespace oceanbase
     {
       timestamp_ = timestamp;
     }
-    
+
     inline ObMergerTabletLocation & ObMergerTabletLocationList::operator[] (const uint64_t index)
     {
       return locations_[index];
     }
   }
 }
-
 
 
 

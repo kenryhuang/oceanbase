@@ -40,6 +40,7 @@ namespace oceanbase
       
       public:
         int load_from_config();
+        int reload_from_config(const char* config_file_name);
 
         inline const char* get_datadir_path() const { return datadir_path_; }
         inline const char* get_application_name() const { return application_name_; }
@@ -62,12 +63,21 @@ namespace oceanbase
         inline int64_t get_merge_threshold_load_high() const { return merge_threshold_load_high_;}
         inline int64_t get_merge_threshold_request_high() const {return merge_threshold_request_high_;}
         inline int64_t get_merge_delay_interval() const {return merge_delay_interval_;}
-        inline int64_t get_max_merge_duration() const {return max_merge_duration_;}
+        inline int64_t get_merge_delay_for_lsync() const {return merge_delay_for_lsync_;}
+        inline int64_t get_merge_scan_use_preread() const {return merge_scan_use_preread_;}
         inline int64_t get_merge_timeout() const {return merge_timeout_;}
+        inline int64_t get_merge_pause_row_count() const { return merge_pause_row_count_; }
+        inline int64_t get_merge_pause_sleep_time() const { return merge_pause_sleep_time_; }
+        inline int64_t get_merge_highload_sleep_time() const { return merge_highload_sleep_time_; }
+        
         inline int64_t get_merge_adjust_ratio() const {return merge_adjust_ratio_;}
-        inline int64_t get_max_verion_gap() const {return max_version_gap_;}
+        inline int64_t get_max_version_gap() const {return max_version_gap_;}
         inline int64_t get_min_merge_interval() const {return min_merge_interval_;}
         inline int64_t get_min_drop_cache_wait_time() const {return min_drop_cache_wait_time_;}
+        inline int64_t get_fetch_ups_interval() const { return fetch_ups_interval_; }
+        inline int64_t get_task_left_time() const { return task_left_time_; }
+        inline int64_t get_write_sstable_io_type() const {return write_sstable_io_type_; }
+        
         inline const sstable::ObBlockCacheConf& get_block_cache_conf() const { return bc_conf_; }
         inline const sstable::ObBlockIndexCacheConf& get_block_index_cache_conf() const { return bic_conf_; }
         inline const sstable::ObBlockIndexCacheConf& get_join_cache_conf() const { return jc_conf_; }
@@ -108,12 +118,19 @@ namespace oceanbase
         int64_t merge_threshold_load_high_;
         int64_t merge_threshold_request_high_;
         int64_t merge_delay_interval_;
-        int64_t max_merge_duration_;
+        int64_t merge_delay_for_lsync_;
+        int64_t merge_scan_use_preread_;
         int64_t merge_timeout_;
+        int64_t merge_pause_row_count_;
+        int64_t merge_pause_sleep_time_;
+        int64_t merge_highload_sleep_time_;
         int64_t merge_adjust_ratio_;
         int64_t max_version_gap_;
         int64_t min_merge_interval_;
         int64_t min_drop_cache_wait_time_;
+        int64_t fetch_ups_interval_;
+        int64_t task_left_time_;
+        int64_t write_sstable_io_type_;
 
         sstable::ObBlockCacheConf bc_conf_;
         sstable::ObBlockIndexCacheConf bic_conf_;

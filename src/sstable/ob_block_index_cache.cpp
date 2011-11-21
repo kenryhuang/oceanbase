@@ -97,9 +97,11 @@ namespace oceanbase
       return ret;
     }
     
-    int ObBlockIndexCache::read_prepare_block_index(
-        const ObBlockIndexPositionInfo& block_index_info, 
-        const uint64_t table_id)
+    int ObBlockIndexCache::read_sstable_block_index(
+        const ObBlockIndexPositionInfo& block_index_info,
+        ObSSTableBlockIndexV2& block_index, 
+        const uint64_t table_id,
+        Handle& handle)
     {
       int ret                         = OB_SUCCESS;
       int64_t block_index_size        = sizeof(ObSSTableBlockIndexV2);
@@ -178,12 +180,13 @@ namespace oceanbase
         }
         else
         {
-          /**
-           * put the ObSSTableBlockIndexV2 instance into cache, maybe the 
-           * block index is existent in block index cache, so ignore the 
-           * return value. 
-           */
-          kv_cache_.put(block_index_info, *bci_tmp, false);
+          ret = kv_cache_.put_and_fetch(block_index_info, *bci_tmp, block_index, 
+                                        handle, false, false);
+          if (OB_SUCCESS != ret)
+          {
+            TBSYS_LOG(WARN, "failed to put and fetch block index from kvcache, table_id=%lu",
+                      table_id);
+          }
         }
       }
 
@@ -214,13 +217,8 @@ namespace oceanbase
         else
         {
           //read data from disk
-          ret = read_prepare_block_index(block_index_info, table_id);
+          ret = read_sstable_block_index(block_index_info, block_index, table_id, handle);
           INC_STAT(table_id, INDEX_BLOCK_INDEX_CACHE_MISS, 1);
-          if (OB_SUCCESS == ret)
-          {
-            //get block index from cache again
-            ret = kv_cache_.get(block_index_info, block_index, handle, false);
-          }
         }
       }
       
@@ -263,6 +261,7 @@ namespace oceanbase
         ObBlockPositionInfos& pos_info)
     {
       int ret = OB_SUCCESS;
+      bool revert_handle = false;
       ObSSTableBlockIndexV2 block_index;
       Handle handle;
     
@@ -288,11 +287,12 @@ namespace oceanbase
       }
       else
       {
+        revert_handle = true;
         ret = block_index.search_batch_blocks_by_key(
             table_id, column_group_id, key, search_mode, pos_info);
       }
       
-      if (OB_SUCCESS != kv_cache_.revert(handle))
+      if (revert_handle && OB_SUCCESS != kv_cache_.revert(handle))
       {
         //must revert the handle
         TBSYS_LOG(WARN, "failed to revert  block index cache handle");
@@ -310,6 +310,7 @@ namespace oceanbase
         ObBlockPositionInfos& pos_info)
     {
       int ret = OB_SUCCESS;
+      bool revert_handle = false;
       ObSSTableBlockIndexV2 block_index;
       Handle handle;
     
@@ -328,11 +329,12 @@ namespace oceanbase
       }
       else
       {
+        revert_handle = true;
         ret = block_index.search_batch_blocks_by_range(
             table_id, column_group_id, range, is_reverse_scan, pos_info);
       }
 
-      if (OB_SUCCESS != kv_cache_.revert(handle))
+      if (revert_handle && OB_SUCCESS != kv_cache_.revert(handle))
       {
         //must revert the handle
         TBSYS_LOG(WARN, "failed to revert  block index cache handle");
@@ -350,6 +352,7 @@ namespace oceanbase
         ObBlockPositionInfo& pos_info)
     {
       int ret = OB_SUCCESS;
+      bool revert_handle = false;
       ObSSTableBlockIndexV2 block_index;
       Handle handle;
 
@@ -368,11 +371,12 @@ namespace oceanbase
       }
       else
       {
+        revert_handle = true;
         ret = block_index.search_one_block_by_key(
             table_id, column_group_id, key, search_mode, pos_info);
       }
 
-      if (OB_SUCCESS != kv_cache_.revert(handle))
+      if (revert_handle && OB_SUCCESS != kv_cache_.revert(handle))
       {
         //must revert the handle
         TBSYS_LOG(WARN, "failed to revert  block index cache handle");
@@ -390,6 +394,7 @@ namespace oceanbase
         ObBlockPositionInfos &pos_info)
     {
       int ret = OB_SUCCESS;
+      bool revert_handle = false;
       ObSSTableBlockIndexV2 block_index;
       Handle handle;
     
@@ -408,11 +413,12 @@ namespace oceanbase
       }
       else
       {
+        revert_handle = true;
         ret = block_index.search_batch_blocks_by_offset(
             table_id, column_group_id, cur_offset, search_mode, pos_info);
       }
 
-      if (OB_SUCCESS != kv_cache_.revert(handle))
+      if (revert_handle && OB_SUCCESS != kv_cache_.revert(handle))
       {
         //must revert the handle
         TBSYS_LOG(WARN, "failed to revert  block index cache handle");

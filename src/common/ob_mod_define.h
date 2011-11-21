@@ -70,6 +70,7 @@ namespace oceanbase
         OB_KVSTORE_CACHE,
         OB_TSI_FACTORY,
         OB_THREAD_OBJPOOL,
+        OB_ROW_COMPACTION,
 
         // mergeserver modules
         OB_MS_CELL_ARRAY,
@@ -108,6 +109,7 @@ namespace oceanbase
       ADD_MOD(OB_KVSTORE_CACHE);
       ADD_MOD(OB_TSI_FACTORY);
       ADD_MOD(OB_THREAD_OBJPOOL);
+      ADD_MOD(OB_ROW_COMPACTION);
 
       ADD_MOD(OB_MS_CELL_ARRAY);
       ADD_MOD(OB_MS_LOCATION_CACHE);

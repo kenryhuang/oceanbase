@@ -9,22 +9,30 @@ LDADD = $(top_builddir)/src/common/libcommon.a \
 				${TBLIB_ROOT}/lib/libtbsys.a 
 
 AM_LDFLAGS = -lpthread -lc -lm -lrt  -lnuma
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
-pub_source = ob_ms_schema_task.cpp \
+
+pub_source = \
+             ob_ms_schema_task.cpp \
              ob_ms_lease_task.cpp \
              ob_ms_monitor_task.cpp \
+             ob_ms_ups_task.cpp \
              ob_merge_server.cpp \
 				 		 ob_cell_stream.cpp \
 						 ob_ms_service_monitor.cpp \
              ob_merge_server_main.cpp \
 						 ob_cell_operator.cpp  \
 						 ob_merge_server_params.cpp \
+             ob_ms_server_blacklist.cpp \
 					 	 ob_ms_rpc_proxy.cpp\
 						 ob_merge_join_agent_imp.cpp \
 						 ob_merge_server_service.cpp \
 						 ob_ms_cache_table.cpp \
-						 ob_btree_engine_alloc.cpp \
 						 ob_ms_btreemap.cpp	\
+             ob_ms_read_balance.cpp \
 						 ob_ms_tablet_location.cpp \
 						 ob_ms_schema_manager.cpp \
 						 ob_ms_get_cell_stream.cpp\
@@ -44,17 +52,15 @@ bin_PROGRAMS = mergeserver
 libmergeserver_a_SOURCES= ${pub_source} ob_ms_rpc_stub.cpp ob_merge_join_agent.cpp
 mergeserver_SOURCES= main.cpp ${pub_source} ob_ms_rpc_stub.cpp ob_merge_join_agent.cpp
 EXTRA_DIST = \
-	     ob_atomic.h \
-	     ob_memtank.h \
-       ob_btree_engine_alloc.h \
 	     ob_cell_operator.h \
 	     ob_cell_stream.h \
-	     ob_cs_get_cell_stream_wrapper.h \
+       ob_cs_get_cell_stream_wrapper.h \
 	     ob_merge_join_agent.h \
 	     ob_merge_join_agent_imp.h \
 	     ob_merge_server.h \
 	     ob_merge_server_main.h \
 	     ob_merge_server_params.h \
+	     ob_ms_server_blacklist.h \
 	     ob_merge_server_service.h \
 	     ob_ms_stlmap.h \
 	     ob_ms_btreemap.h \
@@ -71,7 +77,9 @@ EXTRA_DIST = \
 	     ob_ms_schema_task.h \
        ob_ms_lease_task.h \
        ob_ms_monitor_task.h \
-	     ob_read_param_modifier.h \
+	     ob_ms_ups_task.h \
+       ob_ms_read_balance.h \
+       ob_read_param_modifier.h \
 	     ob_row_cell_vec.h \
 	     ob_join_cache.h \
 	     ob_groupby_operator.h \
@@ -82,3 +90,5 @@ EXTRA_DIST = \
 
 pkgdata_data_DATA=mergeserver.conf.template
 pkgdata_datadir=${prefix}/etc
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

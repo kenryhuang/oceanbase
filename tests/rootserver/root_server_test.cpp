@@ -333,6 +333,7 @@ TEST(ObRootServer2Test2, regist_server)
   ObChunkServerManager::iterator it = server_manager.find_by_ip(server);
   ASSERT_TRUE(it != server_manager.end());
   //ASSERT_EQ(0, status);
+  root_server.stop_threads();
 }
 TEST(ObRootServer2Test2, init_report)
 {
@@ -499,7 +500,7 @@ TEST(ObRootServer2Test2, init_report)
 
     }
   }
-
+  root_server->stop_threads();
 }
 TEST(ObRootServer2Test2, update_capacity_info)
 {
@@ -527,6 +528,7 @@ TEST(ObRootServer2Test2, update_capacity_info)
   ObServerStatus* it = server_manager.find_by_ip(server);
   ASSERT_TRUE(it != NULL);
   ASSERT_EQ(20, it->disk_info_.get_percent());
+  root_server->stop_threads();
 }
 //migrate_over
 TEST(ObRootServer2Test2, migrate_over)
@@ -757,7 +759,7 @@ TEST(ObRootServer2Test2, migrate_over)
   ASSERT_FALSE(found_server2);
   ASSERT_TRUE(found_server3);
   ASSERT_TRUE(found_server4);
-
+  root_server->stop_threads();
 }
 TEST(ObRootServer2Test2, cs_stop_start_data_keep)
 {
@@ -889,94 +891,204 @@ TEST(ObRootServer2Test2, cs_stop_start_data_keep)
   root_server->report_tablets(server3, report_list3,0);
   sleep(1);
   rt_q->dump();
-
+  root_server->stop_threads();
 }
-TEST(ObRootServer2Test2, cs_stop_migrate_add_lost)
+
+// bugfix http://bugfree.corp.taobao.com/Bug.php?BugID=113521
+struct MigrateTestEnv
 {
-  ObRootServer2* root_server;
-  ObRootWorkerForTest worker;
-  root_server = worker.get_root_server();
-  ASSERT_TRUE(root_server->init("./root_server.conf", 100, &worker));
-  ObRootServerTester tester(root_server);
-  ObServer server1(ObServer::IPV4, "10.10.10.1", 1001);
-  ObServer server2(ObServer::IPV4, "10.10.10.2", 1001);
-  ObServer server3(ObServer::IPV4, "10.10.10.3", 1001);
-  ObServer server4(ObServer::IPV4, "10.10.10.4", 1001);
+  ObRootWorkerForTest worker_;
+  ObServer cs1_;
+  ObServer cs2_;
+  ObTabletInfo info1_;
+  char buf1[10][30];
+  char buf2[10][30];
+  static const int64_t tablet_version_ = 2;
 
-  int status;
-  tester.get_wait_init_time() = 2 * 1000000;
-  sleep(1);
-  root_server->regist_server(server1, false, status);
-  root_server->regist_server(server2, false, status);
-  root_server->regist_server(server3, false, status);
-  root_server->regist_server(server4, false, status);
-  // now we have two cs 
+  MigrateTestEnv();
+  void setup();
+};
 
-  tester.get_lease_duration() = 10000 * 1000 * 1000;
-  TBSYS_LOG(INFO, "will start test");
-
-  //tester.init_root_table_by_report(); 
-  root_server->update_capacity_info(server1, 50, 10);
-  root_server->update_capacity_info(server2, 50, 10);
-  root_server->update_capacity_info(server3, 50, 10);
-  root_server->update_capacity_info(server4, 50, 10);
-
-  create_root_table(root_server);
-  sleep(2);
-  ObRootTable2* rt_q = tester.get_root_table_for_query();
-  rt_q->dump();
-  rt_q->server_off_line(2, 20);
-  rt_q->dump();
-  TBSYS_LOG(INFO, "will start add lost test");
-
-  tester.get_one_safe_duration() = 1000 * 1000;  // 1s
-  sleep(5);
-
-}
-TEST(ObRootServer2Test2, reach_high_disk_level_migrate_out)
+MigrateTestEnv::MigrateTestEnv()
+  :cs1_(ObServer::IPV4, "10.10.10.1", 1001),
+   cs2_(ObServer::IPV4, "10.10.10.2", 1002)
 {
-  ObRootServer2* root_server;
-  ObRootWorkerForTest worker;
-  root_server = worker.get_root_server();
-  ASSERT_TRUE(root_server->init("./root_server.conf", 100, &worker));
-  ObRootServerTester tester(root_server);
-  ObServer server1(ObServer::IPV4, "10.10.10.1", 1001);
-  ObServer server2(ObServer::IPV4, "10.10.10.2", 1001);
-  ObServer server3(ObServer::IPV4, "10.10.10.3", 1001);
-  ObServer server4(ObServer::IPV4, "10.10.10.4", 1001);
-  //int64_t time_stamp = 0;
-
-  int status;
-  tester.get_wait_init_time() = 2 * 1000000;
-  sleep(1);
-  root_server->regist_server(server1, false, status);
-  root_server->regist_server(server2, false, status);
-  root_server->regist_server(server3, false, status);
-  root_server->regist_server(server4, false, status);
-  // now we have two cs 
-
-  tester.get_lease_duration() = 10000 * 1000 * 1000;
-  TBSYS_LOG(INFO, "will start test");
-  //tester.init_root_table_by_report();
-  root_server->update_capacity_info(server1, 50, 10);
-  root_server->update_capacity_info(server2, 50, 10);
-  root_server->update_capacity_info(server3, 50, 10);
-  root_server->update_capacity_info(server4, 50, 10);
-
-  TBSYS_LOG(INFO, "over send start_new_schema now %d have sended",worker.start_new_send_times);
-  create_root_table(root_server);
-  sleep(2);
-  ObRootTable2* rt_q = tester.get_root_table_for_query();
-  rt_q->dump();
-  root_server->update_capacity_info(server1, 50, 49);
-  TBSYS_LOG(INFO, "will start disk high leve migrate");
-
-  tester.get_one_safe_duration() = 1000 * 1000;  // 1s
-  sleep(5);
-  root_server->update_capacity_info(server1, 50, 10);
-  sleep(5);
-
 }
+
+void MigrateTestEnv::setup()
+{
+  // 1. init
+  ObRootServer2* rs = worker_.get_root_server();
+  ASSERT_TRUE(rs->init("./root_server.conf", 100, &worker_));
+
+  rs->start_threads();
+  sleep(1);
+  
+  // 2. cs register
+  int status;
+  ASSERT_EQ(OB_SUCCESS, rs->regist_server(cs1_, false, status));
+  ASSERT_EQ(OB_SUCCESS, rs->regist_server(cs2_, false, status));
+
+  // 3. cs1 report tablets replicas
+  ObTabletReportInfoList report_list1;
+  ObTabletReportInfoList report_list2;
+  ObTabletReportInfo report_info;
+  ObTabletLocation location;
+  location.tablet_version_ = tablet_version_;
+  info1_.range_.table_id_ = 10001;
+  info1_.range_.border_flag_.set_inclusive_end();
+  info1_.range_.border_flag_.unset_inclusive_start();
+  info1_.range_.border_flag_.set_min_value();
+  info1_.range_.border_flag_.unset_max_value();
+
+  info1_.range_.start_key_.assign_buffer(buf1[0], 30);
+  info1_.range_.end_key_.assign_buffer(buf2[0], 30);
+  info1_.range_.start_key_.write("aa1", 3);
+  info1_.range_.end_key_.write("ba1", 3);
+
+  location.chunkserver_ = cs1_;
+
+  report_info.tablet_info_ = info1_;
+  report_info.tablet_location_ = location;
+  report_list1.add_tablet(report_info);
+
+  info1_.range_.border_flag_.unset_min_value();
+  info1_.range_.border_flag_.set_max_value();
+  info1_.range_.start_key_.assign_buffer(buf1[1], 30);
+  info1_.range_.end_key_.assign_buffer(buf2[1], 30);
+  info1_.range_.start_key_.write("ba1", 3);
+  info1_.range_.end_key_.write("ca1", 3);
+
+  report_info.tablet_info_ = info1_;
+  report_info.tablet_location_ = location;
+  report_list1.add_tablet(report_info);
+
+  int64_t now = tbsys::CTimeUtil::getTime();
+  ASSERT_EQ(OB_SUCCESS, rs->report_tablets(cs1_, report_list1, now));
+  ASSERT_EQ(OB_SUCCESS, rs->report_tablets(cs2_, report_list2, now));
+
+  // wait init finish
+  sleep(5);
+}
+
+TEST(ObRootServer2Test2, migrate_over2_1)
+{
+  MigrateTestEnv env;
+  env.setup();
+  
+  ObRootServer2* rs = env.worker_.get_root_server();
+  ObRootServerTester tester(rs);
+  ObChunkServerManager& csmgr = tester.get_server_manager();
+  ObRootTable2* roottable = tester.get_root_table_for_query();
+
+  /// case 1
+  // 4. target cs2 down  
+  ObChunkServerManager::iterator it = csmgr.find_by_ip(env.cs2_);
+  ASSERT_TRUE(csmgr.end() != it);
+  csmgr.set_server_down(it);
+  int64_t now = tbsys::CTimeUtil::getTime();
+  roottable->server_off_line(it - csmgr.begin(), now);
+  
+  // 5. report migrate over 
+  rs->migrate_over(env.info1_.range_, env.cs1_, env.cs2_, true, env.tablet_version_);
+
+  // 6. verify
+  ObRootTable2::const_iterator it1, it2;
+  ASSERT_EQ(OB_SUCCESS, roottable->find_range(env.info1_.range_, it1, it2));
+  ASSERT_EQ(it1, it2);
+  ASSERT_EQ(0, it1->server_info_indexes_[0]);
+  ASSERT_EQ(OB_INVALID_INDEX, it1->server_info_indexes_[1]);
+  ASSERT_EQ(OB_INVALID_INDEX, it1->server_info_indexes_[2]);
+  rs->stop_threads();
+}
+
+TEST(ObRootServer2Test2, migrate_over2_2)
+{
+  MigrateTestEnv env;
+  env.setup();
+  
+  ObRootServer2* rs = env.worker_.get_root_server();
+  ObRootServerTester tester(rs);
+  ObChunkServerManager& csmgr = tester.get_server_manager();
+  ObRootTable2* roottable = tester.get_root_table_for_query();
+
+  /// case 2
+  // 4. target cs2 down  
+  ObChunkServerManager::iterator it = csmgr.find_by_ip(env.cs2_);
+  ASSERT_TRUE(csmgr.end() != it);
+  csmgr.set_server_down(it);
+  int64_t now = tbsys::CTimeUtil::getTime();
+  roottable->server_off_line(it - csmgr.begin(), now);
+  
+  // 5. report migrate over 
+  rs->migrate_over(env.info1_.range_, env.cs1_, env.cs2_, false, env.tablet_version_);
+  ObRootTable2::const_iterator it1, it2;
+  ASSERT_EQ(OB_SUCCESS, roottable->find_range(env.info1_.range_, it1, it2));
+  ASSERT_EQ(it1, it2);  
+  ASSERT_EQ(OB_INVALID_INDEX, it1->server_info_indexes_[0]);
+  ASSERT_EQ(OB_INVALID_INDEX, it1->server_info_indexes_[1]);
+  ASSERT_EQ(OB_INVALID_INDEX, it1->server_info_indexes_[2]);
+  rs->stop_threads();
+}
+
+TEST(ObRootServer2Test2, migrate_over2_3)
+{
+  MigrateTestEnv env;
+  env.setup();
+  
+  ObRootServer2* rs = env.worker_.get_root_server();
+  ObRootServerTester tester(rs);
+  ObChunkServerManager& csmgr = tester.get_server_manager();
+  ObRootTable2* roottable = tester.get_root_table_for_query();
+
+  /// case 3
+  // 4. source cs1 down  
+  ObChunkServerManager::iterator it = csmgr.find_by_ip(env.cs1_);
+  ASSERT_TRUE(csmgr.end() != it);
+  csmgr.set_server_down(it);
+  int64_t now = tbsys::CTimeUtil::getTime();
+  roottable->server_off_line(it - csmgr.begin(), now);
+  
+  // 5. report migrate over 
+  rs->migrate_over(env.info1_.range_, env.cs1_, env.cs2_, true, env.tablet_version_);
+  ObRootTable2::const_iterator it1, it2;
+  ASSERT_EQ(OB_SUCCESS, roottable->find_range(env.info1_.range_, it1, it2));
+  ASSERT_EQ(it1, it2);  
+  ASSERT_EQ(1, it1->server_info_indexes_[0]);
+  ASSERT_EQ(OB_INVALID_INDEX, it1->server_info_indexes_[1]);
+  ASSERT_EQ(OB_INVALID_INDEX, it1->server_info_indexes_[2]);
+  rs->stop_threads();
+}
+
+TEST(ObRootServer2Test2, migrate_over2_4)
+{
+  MigrateTestEnv env;
+  env.setup();
+  
+  ObRootServer2* rs = env.worker_.get_root_server();
+  ObRootServerTester tester(rs);
+  ObChunkServerManager& csmgr = tester.get_server_manager();
+  ObRootTable2* roottable = tester.get_root_table_for_query();
+
+  /// case 3
+  // 4. source cs1 down  
+  ObChunkServerManager::iterator it = csmgr.find_by_ip(env.cs1_);
+  ASSERT_TRUE(csmgr.end() != it);
+  csmgr.set_server_down(it);
+  int64_t now = tbsys::CTimeUtil::getTime();
+  roottable->server_off_line(it - csmgr.begin(), now);
+  
+  // 5. report migrate over 
+  rs->migrate_over(env.info1_.range_, env.cs1_, env.cs2_, false, env.tablet_version_);
+  ObRootTable2::const_iterator it1, it2;
+  ASSERT_EQ(OB_SUCCESS, roottable->find_range(env.info1_.range_, it1, it2));
+  ASSERT_EQ(it1, it2);  
+  ASSERT_EQ(1, it1->server_info_indexes_[0]);
+  ASSERT_EQ(OB_INVALID_INDEX, it1->server_info_indexes_[1]);
+  ASSERT_EQ(OB_INVALID_INDEX, it1->server_info_indexes_[2]);
+  rs->stop_threads();
+}
+
 int main(int argc, char **argv)
 {
   ob_init_memory_pool();

@@ -17,6 +17,7 @@
 #include "ob_ms_rpc_stub.h"
 
 #include "common/utility.h"
+#include "common/ob_crc64.h"
 #include "common/ob_schema.h"
 #include "common/ob_scanner.h"
 #include "common/ob_read_common_data.h"
@@ -30,21 +31,26 @@
 using namespace oceanbase::common;
 using namespace oceanbase::mergeserver;
 
-ObMergerRpcProxy::ObMergerRpcProxy()
+ObMergerRpcProxy::ObMergerRpcProxy(const ObServerType type):ups_list_lock_(tbsys::WRITE_PRIORITY)
 {
   init_ = false;
   rpc_stub_ = NULL;
   monitor_ = NULL;
   rpc_retry_times_ = 0;
   rpc_timeout_ = 0;
+  cur_finger_print_ = 0;
   memset(max_rowkey_, 0xFF, sizeof(max_rowkey_));
+  fail_count_threshold_ = 20;
+  black_list_timeout_ = 100 * 1000 * 1000L;
   fetch_schema_timestamp_ = 0;
+  server_type_ = type;
   tablet_cache_ = NULL;
   schema_manager_ = NULL;
 }
 
 ObMergerRpcProxy::ObMergerRpcProxy(const int64_t retry_times, const int64_t timeout,
-    const ObServer & root_server, const ObServer & update_server, const ObServer & merge_server)
+    const ObServer & root_server, const ObServer & update_server, const ObServer & merge_server,
+    const ObServerType type)
 {
   init_ = false;
   rpc_retry_times_ = retry_times;
@@ -52,8 +58,10 @@ ObMergerRpcProxy::ObMergerRpcProxy(const int64_t retry_times, const int64_t time
   root_server_ = root_server;
   update_server_ = update_server;
   merge_server_ = merge_server;
+  server_type_ = type;
   rpc_stub_ = NULL;
   monitor_ = NULL;
+  cur_finger_print_ = 0;
   memset(max_rowkey_, 0xFF, sizeof(max_rowkey_));
   fetch_schema_timestamp_ = 0;
   tablet_cache_ = NULL;
@@ -92,6 +100,53 @@ int ObMergerRpcProxy::init(ObMergerRpcStub * rpc_stub,
     tablet_cache_ = cache;
     monitor_ = monitor;
     init_ = true;
+  }
+  return ret;
+}
+
+int ObMergerRpcProxy::fetch_update_server_list(int32_t & count)
+{
+  int ret = OB_SUCCESS;
+  if (!check_inner_stat())
+  {
+    TBSYS_LOG(ERROR, "%s", "check inner stat failed");
+    ret = OB_ERROR;
+  }
+  else
+  {
+    ObUpsList list;
+    ret = rpc_stub_->fetch_server_list(rpc_timeout_, root_server_, list);
+    if (ret != OB_SUCCESS)
+    {
+      TBSYS_LOG(WARN, "fetch server list from root server failed:ret[%d]", ret);
+    }
+    else
+    {
+      count = list.ups_count_;
+      // if has error modify the list
+      modify_ups_list(list);
+      // check finger print changed
+      uint64_t finger_print = ob_crc64(&list, sizeof(list));
+      if (finger_print != cur_finger_print_)
+      {
+        TBSYS_LOG(INFO, "ups list changed succ:cur[%lu], new[%lu]", cur_finger_print_, finger_print);
+        list.print();
+        tbsys::CWLockGuard lock(ups_list_lock_);
+        cur_finger_print_ = finger_print;
+        memcpy(&update_server_list_, &list, sizeof(update_server_list_));
+        // init update server blacklist fail_count threshold, timeout
+        ret = black_list_.init(fail_count_threshold_, black_list_timeout_, server_type_, update_server_list_);
+        if (ret != OB_SUCCESS)
+        {
+          // if failed use old blacklist info
+          TBSYS_LOG(ERROR, "init black list failed use old blacklist info:ret[%d]", ret);
+        }
+      }
+      else
+      {
+        TBSYS_LOG(DEBUG, "ups list not changed:finger[%lu], count[%d]", finger_print, list.ups_count_);
+      }
+    }
   }
   return ret;
 }
@@ -293,20 +348,19 @@ int ObMergerRpcProxy::fetch_schema_version(int64_t & timestamp)
 }
 
 // get the first tablet location through range, according to the range
-int ObMergerRpcProxy::get_first_tablet_location(const ObScanParam & scan_param, ObMergerTabletLocationList & list)
+int ObMergerRpcProxy::get_first_tablet_location(const ObScanParam & scan_param, ObString & search_key, 
+    char ** temp, ObMergerTabletLocationList & list)
 {
   int ret = OB_SUCCESS;
-  ObString search_key;
   const ObRange * range = scan_param.get_range();
-  if (NULL == range)
+  if ((NULL == range) || (NULL == temp))
   {
-    TBSYS_LOG(ERROR, "check scan param range failed:range[%p]", range);
+    TBSYS_LOG(ERROR, "check scan param range or temp buffer failed:range[%p], temp[%p]", range, temp);
     ret = OB_INPUT_PARAM_ERROR;
   }
   else
   {
-    char * temp = NULL;
-    ret = get_search_key(scan_param, search_key, &temp);
+    ret = get_search_key(scan_param, search_key, temp);
     if (OB_SUCCESS != ret)
     {
       TBSYS_LOG(ERROR, "get search key failed:table_id[%lu], ret[%d]", range->table_id_, ret);
@@ -327,7 +381,6 @@ int ObMergerRpcProxy::get_first_tablet_location(const ObScanParam & scan_param, 
         TBSYS_LOG(DEBUG, "get tablet location list succ:table_id[%lu]", range->table_id_);
       }
     }
-    reset_search_key(search_key, temp);
   }
   return ret;
 }
@@ -427,7 +480,6 @@ int ObMergerRpcProxy::get_tablet_location(const uint64_t table_id, const ObStrin
 int ObMergerRpcProxy::scan_root_table(const uint64_t table_id, const ObString & row_key,
     ObMergerTabletLocationList & location)
 {
-  //TBSYS_LOG(INFO, "scan root table for get tablet location");
   int ret = OB_SUCCESS;
   ObScanner scanner;
   // root table id = 0
@@ -440,6 +492,18 @@ int ObMergerRpcProxy::scan_root_table(const uint64_t table_id, const ObString & 
     hex_dump(row_key.ptr(), row_key.length(), true);
   }
   else
+  {
+    // waring: must del at first after return success because of the new item maybe not 
+    // set the invalid item. for example after the tablet combine happened, 
+    // the old tablet split point is still exist after renew
+    // so there is no chance for us to delete the old split tablet except the code below
+    if (OB_SUCCESS != tablet_cache_->del(table_id, row_key))
+    {
+      TBSYS_LOG(DEBUG, "del the cache item failed:table_id[%lu]", table_id);
+    }
+  }
+
+  if (OB_SUCCESS == ret)
   {
     ObRange range;
     range.border_flag_.unset_inclusive_start();
@@ -465,7 +529,7 @@ int ObMergerRpcProxy::scan_root_table(const uint64_t table_id, const ObString & 
       start_key.assign(cell->row_key_.ptr(), cell->row_key_.length());
       ++iter;
     }
-
+    
     if (ret == OB_SUCCESS)
     {
       int64_t ip = 0;
@@ -513,7 +577,7 @@ int ObMergerRpcProxy::scan_root_table(const uint64_t table_id, const ObString & 
               TBSYS_LOG(ERROR, "check range not include this key:ret[%d]", ret);
               hex_dump(row_key.ptr(), row_key.length());
               range.hex_dump();
-              break;
+              //break;
             }
           }
           // add to cache
@@ -699,6 +763,7 @@ int ObMergerRpcProxy::cs_get(const ObGetParam & get_param,
     ObMergerTabletLocation & addr, ObScanner & scanner,  ObIterator * &it_out)
 {
   int ret = OB_SUCCESS;
+  ObMergerTabletLocationList list;
   const ObCellInfo * cell = get_param[0];
   if (!check_inner_stat())
   {
@@ -713,50 +778,51 @@ int ObMergerRpcProxy::cs_get(const ObGetParam & get_param,
   }
   else
   {
+    // the first cell as tablet location key:table_id + rowkey
+    ret = get_tablet_location(cell->table_id_, cell->row_key_, list);
+    if (OB_SUCCESS != ret)
+    {
+      TBSYS_LOG(WARN, "get first cell tablet location failed:table_id[%lu], ret[%d]",
+          cell->table_id_, ret);
+      hex_dump(cell->row_key_.ptr(), cell->row_key_.length());
+    }
+  }
+  
+  if (OB_SUCCESS == ret)
+  {
     bool update_list = false;
-    ObMergerTabletLocationList list;
     for (int64_t i = 0; i <= rpc_retry_times_; ++i)
     {
-      // the first cell as tablet location key:table_id + rowkey
-      ret = get_tablet_location(cell->table_id_, cell->row_key_, list);
-      if (OB_SUCCESS != ret)
+      update_list = false;
+      ret = rpc_stub_->get(rpc_timeout_, list, get_param, addr, scanner, update_list);
+      if (ret != OB_SUCCESS)
       {
-        TBSYS_LOG(WARN, "get first cell tablet location failed:table_id[%lu], ret[%d]",
-            cell->table_id_, ret);
-        hex_dump(cell->row_key_.ptr(), cell->row_key_.length());
-      }
-      else
-      {
-        update_list = false;
-        ret = rpc_stub_->get(rpc_timeout_, list, get_param, addr, scanner, update_list);
-        if (ret != OB_SUCCESS)
+        int64_t timestamp = tbsys::CTimeUtil::getTime();
+        if (timestamp - list.get_timestamp() > ObMergerTabletLocationCache::CACHE_ERROR_TIMEOUT)
         {
-          if (tbsys::CTimeUtil::getTime() - list.get_timestamp() 
-              > ObMergerTabletLocationCache::CACHE_ERROR_TIMEOUT)
+          TBSYS_LOG(DEBUG, "check error cache item timeout:table_id[%lu], timestamp[%ld]",
+              cell->table_id_, list.get_timestamp());
+          /// must remove the old item before set new items
+          int err = scan_root_table(cell->table_id_, cell->row_key_, list);
+          if (OB_SUCCESS != err)
           {
-            TBSYS_LOG(DEBUG, "check error cache item timeout:table_id[%lu], timestamp[%ld]",
-                cell->table_id_, list.get_timestamp());
-            int err = tablet_cache_->del(cell->table_id_, cell->row_key_);
-            if (OB_SUCCESS != err)
-            {
-              TBSYS_LOG(DEBUG, "del error cache item failed:table_id[%lu], ret[%d]", cell->table_id_, err);
-              hex_dump(cell->row_key_.ptr(), cell->row_key_.length());
-            }
-            else
-            {
-              TBSYS_LOG(DEBUG, "del error cache item succ:table_id[%lu]", cell->table_id_);
-            }
-            continue;
+            TBSYS_LOG(ERROR, "get tablet location failed:table_id[%lu], length[%d], ret[%d]",
+                cell->table_id_, cell->row_key_.length(), err);
+            hex_dump(cell->row_key_.ptr(), cell->row_key_.length());
+            // renew the item for succ access
+            list.set_item_valid(timestamp);
+            update_list = true;
           }
         }
-        // update list err time not using lock
-        if (update_list && (list.size() != 0))
+      }
+      
+      // update list err time not using lock
+      if (update_list && (list.size() != 0))
+      {
+        int err = update_cache_item(cell->table_id_, cell->row_key_, list);
+        if (err != OB_SUCCESS)
         {
-          int err = update_cache_item(cell->table_id_, cell->row_key_, list);
-          if (err != OB_SUCCESS)
-          {
-            TBSYS_LOG(DEBUG, "update cache item failed:table_id[%lu], ret[%d]", cell->table_id_, err);
-          }
+          TBSYS_LOG(DEBUG, "update cache item failed:table_id[%lu], ret[%d]", cell->table_id_, err);
         }
       }
 
@@ -798,6 +864,9 @@ int ObMergerRpcProxy::cs_scan(const ObScanParam & scan_param,
     ObMergerTabletLocation & addr, ObScanner & scanner, ObIterator * &it_out)
 {
   int ret = OB_SUCCESS;
+  char * temp_buffer= NULL;
+  ObString search_key;
+  ObMergerTabletLocationList list; 
   const ObRange * range = scan_param.get_range();
   if (!check_inner_stat())
   {
@@ -816,49 +885,50 @@ int ObMergerRpcProxy::cs_scan(const ObScanParam & scan_param,
   }
   else
   {
+    ret = get_first_tablet_location(scan_param, search_key, &temp_buffer, list);
+    if (OB_SUCCESS != ret)
+    {
+      TBSYS_LOG(WARN, "get first tablet location failed:table_id[%lu], ret[%d]",
+          range->table_id_, ret);
+      range->hex_dump();
+    }
+  }
+  
+  if (OB_SUCCESS == ret)
+  {
     bool update_list = false;
-    ObMergerTabletLocationList list; 
     for (int64_t i = 0; i <= rpc_retry_times_; ++i)
     {
-      ret = get_first_tablet_location(scan_param, list);
-      if (OB_SUCCESS != ret)
+      update_list = false;
+      ret = rpc_stub_->scan(rpc_timeout_, list, scan_param, addr, scanner, update_list);
+      if (ret != OB_SUCCESS)
       {
-        TBSYS_LOG(WARN, "get first tablet location failed:ret[%d]", ret);
-        range->hex_dump();
-      }
-      else
-      {
-        update_list = false;
-        ret = rpc_stub_->scan(rpc_timeout_, list, scan_param, addr, scanner, update_list);
-        if (ret != OB_SUCCESS)
+        int64_t timestamp = tbsys::CTimeUtil::getTime();
+        if (timestamp - list.get_timestamp() > ObMergerTabletLocationCache::CACHE_ERROR_TIMEOUT)
         {
-          // washout the first tablet cache item if timeout 
-          if (tbsys::CTimeUtil::getTime() - list.get_timestamp()
-              > ObMergerTabletLocationCache::CACHE_ERROR_TIMEOUT)
+          TBSYS_LOG(DEBUG, "check error cache item timeout:table_id[%lu], timestamp[%ld]",
+              range->table_id_, list.get_timestamp());
+          int err = scan_root_table(range->table_id_, search_key, list);
+          if (OB_SUCCESS != err)
           {
-            TBSYS_LOG(DEBUG, "check error cache item timeout:table_id[%lu], timestamp[%ld]",
-                range->table_id_, list.get_timestamp());
-            if (OB_SUCCESS != del_cache_item(scan_param))
-            {
-              TBSYS_LOG(DEBUG, "del error cache item failed:table_id[%lu]", range->table_id_);
-              continue;
-            }
-            else
-            {
-              TBSYS_LOG(DEBUG, "del error cache item succ:table_id[%lu]", range->table_id_);
-            }
-          }
-        }
-        // update list err time not using lock
-        if (update_list && (list.size() != 0))
-        {
-          int err = update_cache_item(scan_param, list);
-          if (err != OB_SUCCESS)
-          {
-            TBSYS_LOG(DEBUG, "update cache item failed:ret[%d]", err);
+            TBSYS_LOG(ERROR, "get tablet location failed:table_id[%lu], length[%d], ret[%d]",
+                range->table_id_, search_key.length(), err);
+            // set valid again for root server down
+            list.set_item_valid(timestamp);
+            update_list = true;
           }
         }
       }
+      // update list err time not using lock
+      if (update_list && (list.size() != 0))
+      {
+        int err = update_cache_item(range->table_id_, search_key, list);
+        if (err != OB_SUCCESS)
+        {
+          TBSYS_LOG(DEBUG, "update cache item failed:ret[%d]", err);
+        }
+      }
+
       if (OB_SUCCESS == ret)
       {
         it_out = &scanner;
@@ -884,6 +954,9 @@ int ObMergerRpcProxy::cs_scan(const ObScanParam & scan_param,
     }
   }
   
+  /// reset temp buffer for new search key
+  reset_search_key(search_key, temp_buffer);
+  
   if (OB_SUCCESS == ret && TBSYS_LOGGER._level >= TBSYS_LOG_LEVEL_DEBUG)
   {
     scan_param.get_range()->to_string(max_range_, sizeof(max_range_));
@@ -893,6 +966,7 @@ int ObMergerRpcProxy::cs_scan(const ObScanParam & scan_param,
   }
   return ret;
 }
+
 
 int ObMergerRpcProxy::get_search_key(const ObScanParam & scan_param, ObString & search_key, char ** new_buffer)
 {
@@ -1165,6 +1239,143 @@ void ObMergerRpcProxy::reset_search_key(ObString & search_key, char * buffer)
   }
 }
 
+void ObMergerRpcProxy::modify_ups_list(ObUpsList & list)
+{
+  if (0 == list.ups_count_)
+  {
+    // add vip update server to list
+    TBSYS_LOG(DEBUG, "check ups count is zero:count[%d]", list.ups_count_);
+    ObUpsInfo info;
+    info.addr_ = update_server_;
+    // set inner port to update server port
+    info.inner_port_ = update_server_.get_port();
+    info.ms_read_percentage_ = 100;
+    info.cs_read_percentage_ = 100;
+    list.ups_count_ = 1;
+    list.ups_array_[0] = info;
+    list.sum_ms_percentage_ = 100;
+    list.sum_cs_percentage_ = 100;
+  }
+  else if (list.get_sum_percentage(server_type_) <= 0)
+  {
+    TBSYS_LOG(DEBUG, "reset the percentage for all servers");
+    for (int32_t i = 0; i < list.ups_count_; ++i)
+    {
+      // reset all ms and cs to equal
+      list.ups_array_[i].ms_read_percentage_ = 1;
+      list.ups_array_[i].cs_read_percentage_ = 1;
+    }
+    // reset all ms and cs sum percentage to count
+    list.sum_ms_percentage_ = list.ups_count_;
+    list.sum_cs_percentage_ = list.ups_count_;
+  }
+}
+
+int ObMergerRpcProxy::master_ups_get(const ObMergerTabletLocation & addr,
+    const ObGetParam & get_param, ObScanner & scanner)
+{
+  int ret = OB_ERROR;
+  for (int64_t i = 0; i <= rpc_retry_times_; ++i)
+  {
+    ret = rpc_stub_->get(rpc_timeout_, update_server_, get_param, scanner);
+    if (OB_INVALID_START_VERSION == ret)
+    {
+      TBSYS_LOG(WARN, "check chunk server data version failed:ret[%d]", ret);
+      if (NULL != monitor_)
+      {
+        monitor_->inc(get_param[0]->table_id_, ObMergerServiceMonitor::FAIL_CS_VERSION_COUNT);
+      }
+      // update the cache item to err status // addr
+      int err = set_item_invalid(get_param[0]->table_id_, get_param[0]->row_key_, addr);
+      if (err != OB_SUCCESS)
+      {
+        TBSYS_LOG(DEBUG, "set cache item invalid failed:ret[%d]", err);
+      }
+      break;
+    }
+    else if (OB_NOT_MASTER == ret)
+    {
+      TBSYS_LOG(WARN, "get from update server check role failed:ret[%d]", ret);
+      break;
+    }
+    else if (ret != OB_SUCCESS)
+    {
+      TBSYS_LOG(WARN, "get from update server failed:ret[%d]", ret);
+    }
+    else
+    {
+      TBSYS_LOG(DEBUG, "%s", "ups get data succ");
+      break;
+    }
+    usleep(RETRY_INTERVAL_TIME * (i + 1));
+  }
+  return ret;
+}
+
+int ObMergerRpcProxy::slave_ups_get(const ObMergerTabletLocation & addr,
+    const ObGetParam & get_param, ObScanner & scanner)
+{
+  int ret = OB_ERROR;
+  int32_t retry_times = 0;
+  tbsys::CRLockGuard lock(ups_list_lock_);
+  int32_t server_count = update_server_list_.ups_count_;
+  int32_t cur_index = ObMergerReadBalance::select_server(update_server_list_, get_param, server_type_);
+  if (cur_index < 0)
+  {
+    TBSYS_LOG(WARN, "select server failed:count[%d], index[%d]", server_count, cur_index);
+    ret = OB_ERROR;
+  }
+  else
+  {
+    // bring back to alive no need write lock
+    if (black_list_.get_valid_count() <= 0)
+    {
+      TBSYS_LOG(WARN, "check all the update server not invalid:count[%ld]", black_list_.get_valid_count());
+      black_list_.reset();
+    }
+
+    ObServer update_server;
+    for (int32_t i = cur_index; retry_times < server_count; ++i, ++retry_times)
+    {
+      if (false == check_server(i%server_count))
+      {
+        TBSYS_LOG(DEBUG, "check server failed:index[%d]", i%server_count);
+        continue;
+      }
+      update_server = update_server_list_.ups_array_[i%server_count].get_server(server_type_);
+      TBSYS_LOG(DEBUG, "select slave update server for get:index[%d], ip[%ld], port[%d]",
+          i, update_server.get_ipv4(), update_server.get_port());
+      ret = rpc_stub_->get(rpc_timeout_, update_server, get_param, scanner);
+      if (OB_INVALID_START_VERSION == ret)
+      {
+        TBSYS_LOG(WARN, "check chunk server data version failed:ret[%d]", ret);
+        if (NULL != monitor_)
+        {
+          monitor_->inc(get_param[0]->table_id_, ObMergerServiceMonitor::FAIL_CS_VERSION_COUNT);
+        }
+        // update the cache item to err status // addr
+        int err = set_item_invalid(get_param[0]->table_id_, get_param[0]->row_key_, addr);
+        if (err != OB_SUCCESS)
+        {
+          TBSYS_LOG(DEBUG, "set cache item invalid failed:ret[%d]", err);
+        }
+      }
+      else if (ret != OB_SUCCESS)
+      {
+        // inc update server fail counter for blacklist
+        black_list_.fail(i%server_count, update_server);
+        TBSYS_LOG(WARN, "get from update server failed:ret[%d]", ret);
+      }
+      else
+      {
+        TBSYS_LOG(DEBUG, "%s", "ups get data succ");
+        break;
+      }
+    }
+  }
+  return ret;
+}
+
 //
 int ObMergerRpcProxy::ups_get(const ObMergerTabletLocation & addr, 
     const ObGetParam & get_param, ObScanner & scanner)
@@ -1175,61 +1386,172 @@ int ObMergerRpcProxy::ups_get(const ObMergerTabletLocation & addr,
     TBSYS_LOG(ERROR, "%s", "check inner stat failed");
     ret = OB_INNER_STAT_ERROR;
   }
-  else
+  else if (NULL == get_param[0])
   {
-    ObCellInfo * cell = get_param[0];
-    if (NULL == cell)
+    TBSYS_LOG(ERROR, "check first cell failed:cell[%p]", get_param[0]);
+    ret = OB_INPUT_PARAM_ERROR;
+  }
+  else if (true == get_param.get_is_read_consistency())
+  {
+    ret = master_ups_get(addr, get_param, scanner);
+    if (ret != OB_SUCCESS)
     {
-      TBSYS_LOG(ERROR, "check first cell failed:cell[%p]", cell);
-      ret = OB_INPUT_PARAM_ERROR;
-    }
-    else
-    {
-      for (int64_t i = 0; i <= rpc_retry_times_; ++i)
-      {
-        ret = rpc_stub_->get(rpc_timeout_, update_server_, get_param, scanner);
-        if (OB_INVALID_START_VERSION == ret)
-        {
-          TBSYS_LOG(WARN, "check chunk server data version failed:ret[%d]", ret);
-          if (NULL != monitor_)
-          {
-            monitor_->inc(cell->table_id_, ObMergerServiceMonitor::FAIL_CS_VERSION_COUNT);
-          }
-          // update the cache item to err status // addr
-          int err = set_item_invalid(cell->table_id_, cell->row_key_, addr);
-          if (err != OB_SUCCESS)
-          {
-            TBSYS_LOG(DEBUG, "set cache item invalid failed:ret[%d]", err);
-          }
-          break;
-        }
-        else if (ret != OB_SUCCESS)
-        {
-          TBSYS_LOG(WARN, "get from update server failed:ret[%d]", ret);
-        }
-        else
-        {
-          TBSYS_LOG(DEBUG, "%s", "ups get data succ");
-          break;
-        }
-        usleep(RETRY_INTERVAL_TIME);
-      }
+      TBSYS_LOG(WARN, "get master ups failed:ret[%d]", ret);
     }
   }
-  if (OB_SUCCESS == ret
-      && get_param.get_cell_size() > 0 
-      && scanner.is_empty())
+  else
+  {
+    ret = slave_ups_get(addr, get_param, scanner);
+    if (ret != OB_SUCCESS)
+    {
+      TBSYS_LOG(WARN, "get slave ups failed:ret[%d]", ret);
+    }
+  }
+
+  if ((OB_SUCCESS == ret) && (get_param.get_cell_size() > 0) && scanner.is_empty())
   {
     TBSYS_LOG(WARN, "%s", "update server error, response request with zero cell");
     ret = OB_ERR_UNEXPECTED;
   }
-  
+
   if (OB_SUCCESS == ret && TBSYS_LOGGER._level >= TBSYS_LOG_LEVEL_DEBUG)
   {
     TBSYS_LOG(DEBUG, "%s", "ups_get");
     output(scanner);
   }
-  return ret;  
+  return ret;
+}
+
+int ObMergerRpcProxy::master_ups_scan(const ObMergerTabletLocation & addr,
+    const ObScanParam & scan_param, ObScanner & scanner)
+{
+  int ret = OB_ERROR;
+  for (int64_t i = 0; i <= rpc_retry_times_; ++i)
+  {
+    ret = rpc_stub_->scan(rpc_timeout_, update_server_, scan_param, scanner);
+    if (OB_INVALID_START_VERSION == ret)
+    {
+      TBSYS_LOG(WARN, "check chunk server data version failed:ret[%d]", ret);
+      if (NULL != monitor_)
+      {
+        monitor_->inc(scan_param.get_table_id(), ObMergerServiceMonitor::FAIL_CS_VERSION_COUNT);
+      }
+      // update the cache item to err status // addr
+      int err = set_item_invalid(scan_param, addr);
+      if (err != OB_SUCCESS)
+      {
+        TBSYS_LOG(WARN, "set cache item valid failed:ret[%d]", err);
+      }
+      break;
+    }
+    else if (OB_NOT_MASTER == ret)
+    {
+      TBSYS_LOG(WARN, "get from update server check role failed:ret[%d]", ret);
+      break;
+    }
+    else if (ret != OB_SUCCESS)
+    {
+      TBSYS_LOG(WARN, "get from update server failed:ret[%d]", ret);
+    }
+    else
+    {
+      TBSYS_LOG(DEBUG, "%s", "ups scan data succ");
+      break;
+    }
+    usleep(RETRY_INTERVAL_TIME * (i + 1));
+  }
+  return ret;
+}
+
+int ObMergerRpcProxy::set_blacklist_param(const int64_t timeout, const int64_t fail_count)
+{
+  int ret = OB_SUCCESS;
+  if ((timeout <= 0) || (fail_count <= 0))
+  {
+    ret = OB_INVALID_ARGUMENT;
+    TBSYS_LOG(WARN, "check blacklist param failed:timeout[%ld], threshold[%ld]", timeout, fail_count);
+  }
+  else
+  {
+    fail_count_threshold_ = fail_count;
+    black_list_timeout_ = timeout;
+  }
+  return ret;
+}
+
+bool ObMergerRpcProxy::check_server(const int32_t index)
+{
+  bool ret = true;
+  // check the read percentage and not in black list, if in list timeout make it to be alive
+  if ((false == black_list_.check(index))
+    || (update_server_list_.ups_array_[index].get_read_percentage(server_type_) <= 0))
+  {
+    ret = false;
+  }
+  return ret;
+}
+
+int ObMergerRpcProxy::slave_ups_scan(const ObMergerTabletLocation & addr,
+    const ObScanParam & scan_param, ObScanner & scanner)
+{
+  int ret = OB_ERROR;
+  int32_t retry_times = 0;
+  tbsys::CRLockGuard lock(ups_list_lock_);
+  int32_t server_count = update_server_list_.ups_count_;
+  int32_t cur_index = ObMergerReadBalance::select_server(update_server_list_, scan_param, server_type_);
+  if (cur_index < 0)
+  {
+    TBSYS_LOG(WARN, "select server failed:count[%d], index[%d]", server_count, cur_index);
+    ret = OB_ERROR;
+  }
+  else
+  {
+    // bring back to alive no need write lock
+    if (black_list_.get_valid_count() <= 0)
+    {
+      TBSYS_LOG(WARN, "check all the update server not invalid:count[%ld]", black_list_.get_valid_count());
+      black_list_.reset();
+    }
+    ObServer update_server;
+    for (int32_t i = cur_index; retry_times < server_count; ++i, ++retry_times)
+    {
+      if (false == check_server(i%server_count))
+      {
+        TBSYS_LOG(DEBUG, "check server failed:index[%d]", i%server_count);
+        continue;
+      }
+      update_server = update_server_list_.ups_array_[i%server_count].get_server(server_type_);
+      TBSYS_LOG(DEBUG, "select slave update server for scan:index[%d], ip[%ld], port[%d]",
+          i, update_server.get_ipv4(), update_server.get_port());
+      ret = rpc_stub_->scan(rpc_timeout_, update_server, scan_param, scanner);
+      if (OB_INVALID_START_VERSION == ret)
+      {
+        TBSYS_LOG(WARN, "check chunk server data version failed:ret[%d]", ret);
+        if (NULL != monitor_)
+        {
+          monitor_->inc(scan_param.get_table_id(), ObMergerServiceMonitor::FAIL_CS_VERSION_COUNT);
+        }
+        // update the cache item to err status // addr
+        int err = set_item_invalid(scan_param, addr);
+        if (err != OB_SUCCESS)
+        {
+          TBSYS_LOG(DEBUG, "set cache item invalid failed:ret[%d]", err);
+        }
+      }
+      else if (ret != OB_SUCCESS)
+      {
+        // inc update server fail counter for blacklist
+        black_list_.fail(i%server_count, update_server);
+        TBSYS_LOG(WARN, "get from update server failed:ret[%d]", ret);
+      }
+      else
+      {
+        TBSYS_LOG(DEBUG, "%s", "ups get data succ");
+        break;
+      }
+    }
+  }
+  return ret;
 }
 
 int ObMergerRpcProxy::ups_scan(const ObMergerTabletLocation & addr, 
@@ -1246,40 +1568,24 @@ int ObMergerRpcProxy::ups_scan(const ObMergerTabletLocation & addr,
     TBSYS_LOG(ERROR, "%s", "check scan param failed");
     ret = OB_INPUT_PARAM_ERROR;
   }
-  else
+  else if (true == scan_param.get_is_read_consistency())
   {
-    for (int64_t i = 0; i <= rpc_retry_times_; ++i)
+    ret = master_ups_scan(addr, scan_param, scanner);
+    if (ret != OB_SUCCESS)
     {
-      ret = rpc_stub_->scan(rpc_timeout_, update_server_, scan_param, scanner);
-      if (OB_INVALID_START_VERSION == ret)
-      {
-        TBSYS_LOG(WARN, "check chunk server data version failed:ret[%d]", ret);
-        if (NULL != monitor_)
-        {
-          monitor_->inc(scan_param.get_table_id(), ObMergerServiceMonitor::FAIL_CS_VERSION_COUNT);
-        }
-        // update the cache item to err status // addr
-        int err = set_item_invalid(scan_param, addr);
-        if (err != OB_SUCCESS)
-        {
-          TBSYS_LOG(WARN, "set cache item valid failed:ret[%d]", err);
-        }
-        break;
-      }
-      else if (ret != OB_SUCCESS)
-      {
-        TBSYS_LOG(WARN, "get from update server failed:ret[%d]", ret);
-      }
-      else
-      {
-        TBSYS_LOG(DEBUG, "%s", "ups scan data succ");
-        break;
-      }
-      usleep(RETRY_INTERVAL_TIME * (i + 1));
+      TBSYS_LOG(WARN, "scan master ups failed:ret[%d]", ret);
     }
   }
-  
-  if (OB_SUCCESS == ret && TBSYS_LOGGER._level >= TBSYS_LOG_LEVEL_DEBUG) 
+  else
+  {
+    ret = slave_ups_scan(addr, scan_param, scanner);
+    if (ret != OB_SUCCESS)
+    {
+      TBSYS_LOG(WARN, "scan slave ups failed:ret[%d]", ret);
+    }
+  }
+
+  if (OB_SUCCESS == ret && TBSYS_LOGGER._level >= TBSYS_LOG_LEVEL_DEBUG)
   {
     const ObRange * range = scan_param.get_range();
     if (NULL == range)
@@ -1290,14 +1596,14 @@ int ObMergerRpcProxy::ups_scan(const ObMergerTabletLocation & addr,
     else
     {
       range->to_string(max_range_, sizeof(max_range_));
-      TBSYS_LOG(DEBUG, "ups_scan:table_id[%lu], range[%s], direction[%s]", scan_param.get_table_id(),
-          max_range_, (scan_param.get_scan_direction() == ObScanParam::FORWARD) ? "forward": "backward");
+      TBSYS_LOG(DEBUG, "ups_scan:table_id[%lu], range[%s], direction[%s]",
+          scan_param.get_table_id(), max_range_,
+          (scan_param.get_scan_direction() == ObScanParam::FORWARD) ? "forward": "backward");
       output(scanner);
     }
   }
   return ret;
 }
-
 
 void ObMergerRpcProxy::output(common::ObScanner & result)
 {

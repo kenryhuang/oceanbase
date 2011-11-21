@@ -79,9 +79,22 @@ namespace oceanbase
        *         others: 发生了错误.
        */
       int read_log(LogCommand &cmd, uint64_t &log_seq, char *&log_data, int64_t &data_len);
-
+      inline uint64_t get_cur_log_file_id()
+      {
+        return file_id_;
+      }
+      inline uint64_t get_last_log_seq_id()
+      {
+        return last_log_seq_;
+      }
+      inline uint64_t get_last_log_offset()
+      {
+        return pos;
+      }
       /// @brief is log file opened
       inline bool is_opened() const {return file_.is_opened();}
+
+      inline void unset_dio() {dio_ = false;};
 
     protected:
       /**

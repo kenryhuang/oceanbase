@@ -1,4 +1,9 @@
 AM_CPPFLAGS= -fPIC
+AM_LDFLAGS=-lc -lm -lrt
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_LIBRARIES = libcomp.a
 lib_LTLIBRARIES = liblzo_1.0.la \
@@ -22,3 +27,5 @@ EXTRA_DIST = \
 	ob_compressor.h \
 	snappy_compressor.h \
 	none_compressor.h
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

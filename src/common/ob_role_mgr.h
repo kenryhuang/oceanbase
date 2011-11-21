@@ -80,6 +80,31 @@ namespace oceanbase
         TBSYS_LOG(INFO, "set_state=%d role=%d", state_, role_);
       }
 
+      inline const char* get_role_str() const
+      {
+        switch (role_)
+        {
+          case MASTER:       return "MASTER";
+          case SLAVE:        return "SLAVE";
+          case STANDALONE:   return "STANDALONE";
+          default:           return "UNKNOWN";
+        }
+      }
+
+      inline const char* get_state_str() const
+      {
+        switch (state_)
+        {
+          case ERROR:     return "ERROR";
+          case INIT:      return "INIT";
+          case ACTIVE:    return "ACTIVE";
+          case SWITCHING: return "SWITCHING";
+          case STOP:      return "STOP";
+          case HOLD:      return "HOLD";
+          default:        return "UNKNOWN";
+        }
+      }
+
     private:
       Role role_;
       State state_;

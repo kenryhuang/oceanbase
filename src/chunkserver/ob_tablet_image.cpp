@@ -704,13 +704,13 @@ namespace oceanbase
 
       if (OB_SUCCESS != ret)
       {
-        char range_buf[OB_RANGE_STR_BUFSIZ];
-        range.to_string(range_buf, OB_RANGE_STR_BUFSIZ);
-        TBSYS_LOG(INFO, "failed to find tablet:%s, ret=%d", range_buf, ret);
+        // do nothing.
       }
       else if (NULL == tablet)
       {
-        TBSYS_LOG(WARN, "tablet is NULL");
+        char range_buf[OB_RANGE_STR_BUFSIZ];
+        range.to_string(range_buf, OB_RANGE_STR_BUFSIZ);
+        TBSYS_LOG(ERROR, "found tablet:%s null, ret=%d", range_buf, ret);
         ret = OB_ERROR;
       }
       else
@@ -1037,9 +1037,6 @@ namespace oceanbase
       if (OB_SUCCESS == ret)
       {
         ObString fname(0, strlen(idx_path), const_cast<char*>(idx_path));
-        ObFileReader reader;
-        // use direct io
-        ret = reader.open(fname, true);
 
         char* file_buf = NULL;
         int64_t file_size = get_file_size(idx_path);
@@ -1049,6 +1046,13 @@ namespace oceanbase
         {
           TBSYS_LOG(INFO, "invalid idx file =%s file_size=%ld", idx_path, file_size);
           ret = OB_ERROR;
+        }
+
+        // not use direct io
+        FileComponent::BufferFileReader reader;
+        if (OB_SUCCESS != (ret = reader.open(fname)))
+        {
+          TBSYS_LOG(ERROR, "open %s for read error, %s.", idx_path, strerror(errno));
         }
 
         if (OB_SUCCESS == ret)
@@ -1065,8 +1069,8 @@ namespace oceanbase
           ret = reader.pread(file_buf, file_size, 0, read_size);
           if (ret != OB_SUCCESS || read_size < file_size)
           {
-            TBSYS_LOG(ERROR, "read idx file = %s , ret = %d, read_size = %ld, file_size = %ld",
-                idx_path, ret, read_size, file_size);
+            TBSYS_LOG(ERROR, "read idx file = %s , ret = %d, read_size = %ld, file_size = %ld, %s.",
+                idx_path, ret, read_size, file_size, strerror(errno));
             ret = OB_IO_ERROR;
           }
           else
@@ -1123,12 +1127,12 @@ namespace oceanbase
         int64_t max_serialize_size = get_max_serialize(disk_no);
 
         ObString fname(0, strlen(idx_path), const_cast<char*>(idx_path));
-        ObFileAppender appender;
+        FileComponent::BufferFileAppender appender;
 
-        // use direct io, create new file, trucate if exist.
-        if (OB_SUCCESS != (ret = appender.open(fname, true, true, true)))
+        // not use direct io, create new file, trucate if exist.
+        if (OB_SUCCESS != (ret = appender.open(fname, true, true)))
         {
-          TBSYS_LOG(ERROR, "open idx file = %s for write error.", idx_path);
+          TBSYS_LOG(ERROR, "open idx file = %s for write error, %s.", idx_path, strerror(errno));
         }
         else if (NULL == (meta_buf = static_cast<char*>(ob_malloc(max_serialize_size))))
         {
@@ -1147,12 +1151,12 @@ namespace oceanbase
           }
           else if (OB_SUCCESS != (ret = appender.append(meta_buf, pos, true) ))
           {
-            TBSYS_LOG(ERROR, "write meta buffer failed.");
+            TBSYS_LOG(ERROR, "write meta buffer failed,%s.", strerror(errno));
           }
           else if (builder.get_data_size() > 0 && OB_SUCCESS != (ret = appender.append(
                   builder.get_row_key_buf(), builder.get_data_size(), true)))
           {
-            TBSYS_LOG(ERROR, "write row key buffer failed.");
+            TBSYS_LOG(ERROR, "write row key buffer failed,%s.", strerror(errno));
           }
         }
 

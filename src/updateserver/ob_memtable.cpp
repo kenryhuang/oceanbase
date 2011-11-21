@@ -192,7 +192,7 @@ namespace oceanbase
         value.list_tail = cell_info_node;
         value.cell_info_cnt++;
         value.cell_info_size += cell_info_node->size();
-        if (MAX_ROW_CELLINFO < value.cell_info_cnt
+        if (get_max_row_cell_num() < value.cell_info_cnt
             || MAX_ROW_SIZE < value.cell_info_size)
         {
           merge(key, value, mem_tank_);
@@ -251,6 +251,10 @@ namespace oceanbase
           }
           TBSYS_LOG(DEBUG, "copy row_key this=%p row_key %s", this, cur_key.log_str());
         }
+        else
+        {
+          cur_value.update_count += 1;
+        }
       }
       return ret;
     }
@@ -288,6 +292,10 @@ namespace oceanbase
             }
           }
           TBSYS_LOG(DEBUG, "copy row_key this=%p row_key %s", this, cur_key.log_str());
+        }
+        else
+        {
+          cur_value.update_count += 1;
         }
       }
       return ret;
@@ -602,6 +610,7 @@ namespace oceanbase
     int MemTable::get(MemTableTransHandle &handle,
                       const uint64_t table_id, const ObString &row_key,
                       MemTableIterator &iterator,
+                      bool &is_multi_update,
                       ColumnFilter *column_filter/* = NULL*/)
     {
       int ret = OB_SUCCESS;
@@ -626,6 +635,7 @@ namespace oceanbase
       else
       {
         iterator.set_(key, value, column_filter);
+        is_multi_update = (1 < value.update_count);
       }
       return ret;
     }

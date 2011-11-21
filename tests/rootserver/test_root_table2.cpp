@@ -649,6 +649,73 @@ TEST(RootTable2Test, test_create_table)
   delete info_manager2;
 }
 
+
+TEST(RootTable2Test, test_split_range_top_max)
+{
+  ObRange r1, r2, r3, r4, r5;
+  const char* key1 = "foo1";
+  const char* key2 = "key2";
+  const char* key3 = "too3";
+  const char* key3_4 = "too4";
+  const char* key4 = "woo4";
+
+  uint64_t table1 = 20;
+
+
+  build_range(r1, table1, ObBorderFlag::INCLUSIVE_END|ObBorderFlag::MIN_VALUE, key1, key2);
+  build_range(r2, table1, ObBorderFlag::INCLUSIVE_END, key2, key3);
+  build_range(r3, table1, ObBorderFlag::MAX_VALUE, key3, key4);
+
+  ObTabletInfo t1(r1, 0, 0);
+  ObTabletInfo t2(r2, 0, 0);
+  ObTabletInfo t3(r3, 0, 0);
+
+  ObTabletInfoManager* info_manager = new ObTabletInfoManager();
+  ObRootTable2* root_table = new ObRootTable2(info_manager);
+  root_table->add(t2, 2, 0);
+  root_table->add(t3, 3, 0);
+  root_table->add(t1, 0, 0);
+  root_table->add(t1, 1, 0);
+  root_table->sort();
+
+
+  ObTabletInfoManager* info_manager2 = new ObTabletInfoManager();
+  ObRootTable2* shrink_table = new ObRootTable2(info_manager2);
+  root_table->shrink_to(shrink_table);
+
+  shrink_table->sort();
+  shrink_table->dump();
+  
+  delete root_table;
+  delete info_manager;
+
+  ObRootTable2::const_iterator first;
+  ObRootTable2::const_iterator last;
+
+  build_range(r4, table1, ObBorderFlag::INCLUSIVE_END, key3, key3_4);
+
+  ASSERT_EQ(OB_SUCCESS, shrink_table->find_range(r4, first, last));
+  EXPECT_TRUE(first == last);
+  int range_pos_type =shrink_table->get_range_pos_type(r4, first, last);
+  ASSERT_EQ(ObRootTable2::POS_TYPE_SPLIT_RANGE, range_pos_type);
+
+  ObTabletInfo t4(r4,0,0);
+
+  shrink_table->split_range(t4,first,1,5 );
+  ASSERT_EQ(OB_SUCCESS, shrink_table->find_range(r4, first, last));
+  TBSYS_LOG(WARN, "================================================================");
+  shrink_table->dump();
+  EXPECT_TRUE(first == last);
+  const ObTabletInfo* tablet_info = ((const ObRootTable2*)shrink_table)->get_tablet_info(first);
+  tablet_info->range_.dump();
+  r4.dump();
+  EXPECT_TRUE( tablet_info->range_.equal(r4));
+  EXPECT_TRUE(tablet_info->range_.border_flag_.get_data() == r4.border_flag_.get_data());
+  
+  delete shrink_table;
+  delete info_manager2;
+}
+
 int main(int argc, char** argv)
 {
   ob_init_memory_pool();

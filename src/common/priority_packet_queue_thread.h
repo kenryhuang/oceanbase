@@ -53,11 +53,6 @@ public:
   // Runnable 接口
   void run(tbsys::CThread *thread, void *arg);
 
-  // Sets wait time for normal and low priority queue.
-  void setWaitTime(int normal_priv_wait_ms, int low_priv_wait_ms = 0);
-
-  void getWaitTime(int& normal_priv_wait_ms, int& low_priv_wait_ms);
-
   tbnet::Packet* head(int priority)
   {
     return _queues[priority].head();
@@ -77,7 +72,37 @@ public:
   {
     return _queues[NORMAL_PRIV].size() + _queues[LOW_PRIV].size();
   }
-    
+
+  int64_t get_low_priv_cur_percent()
+  {
+    return _percent[LOW_PRIV];
+  }
+
+  void set_low_priv_cur_percent(const int64_t low_priv_percent)
+  {
+    if (low_priv_percent <= LOW_PRIV_MAX_PERCENT && low_priv_percent >= LOW_PRIV_MIN_PERCENT)
+    {
+      _percent[LOW_PRIV] = low_priv_percent;
+      _percent[NORMAL_PRIV] = 100 - low_priv_percent;
+      _sum = 100;
+    }
+    else
+    {
+      // set to default value
+      _percent[LOW_PRIV] = 10;
+      _percent[NORMAL_PRIV] = 90;
+      _sum = 100;
+    }
+  }
+
+private:
+  // pop packet from packet queue
+  ObPacket* pop_packet_(const int64_t priority);
+
+public:
+  static const int64_t LOW_PRIV_MAX_PERCENT = 90;
+  static const int64_t LOW_PRIV_MIN_PERCENT = 10;
+
 private:
   static const int64_t QUEUE_NUM = 2;
   static const int64_t DEF_WAIT_TIME_MS = 10;   // 10ms
@@ -94,7 +119,8 @@ private:
   bool _waitFinish;       // 等待完成
 
   bool _waiting[QUEUE_NUM];
-  int _waitTime[QUEUE_NUM];
+  int32_t _percent[QUEUE_NUM];
+  int32_t _sum;
 };
 
 }

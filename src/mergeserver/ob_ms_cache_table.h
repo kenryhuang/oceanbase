@@ -122,7 +122,7 @@ namespace oceanbase
               cmp_endkey = row_key.compare(range.end_key_);
             }
 
-            if (-1 == cmp_endkey) // row_key < end_key
+            if (cmp_endkey < 0) // row_key < end_key
             {
               if (range.border_flag_.is_min_value())
               {
@@ -152,7 +152,7 @@ namespace oceanbase
                 }
               }
             }
-            else if (1 == cmp_endkey) // row_key > end_key
+            else if (cmp_endkey > 0) // row_key > end_key
             {
               cmp = 1;
             }
@@ -219,6 +219,11 @@ namespace oceanbase
             else
             {
               ret = range1.compare_with_endkey(range2);
+              TBSYS_LOG(DEBUG, "range1.begin[%.*s], range1.end[%.*s], cmp[%d], "
+                "range2.begin[%.*s], range2.end[%.*s], ", range1.start_key_.length(),
+                range1.start_key_.ptr(), range1.end_key_.length(), range1.end_key_.ptr(),
+                ret, range2.start_key_.length(), range2.start_key_.ptr(), 
+                range2.end_key_.length(), range2.end_key_.ptr());
             }
           }
           return ret;

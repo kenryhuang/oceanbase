@@ -72,11 +72,14 @@ namespace oceanbase
                 && (index_array_cursor_ != INVALID_CURSOR));
       } 
 
-      inline bool has_next_cell() const
+      inline bool is_forward_status() const
       {
         return iterate_status_ == ITERATE_IN_PROGRESS 
-          || iterate_status_ == ITERATE_WILL_STOP;
+          || iterate_status_ == ITERATE_LAST_BLOCK
+          || iterate_status_ == ITERATE_NEED_FORWARD;
       }
+
+      int check_status() const;
 
       /**
        * is the end of block of current batch sstable blocks.
@@ -84,24 +87,37 @@ namespace oceanbase
        */
       bool is_end_of_block() const;
 
-      int get_first_batch_block_index();
+      /**
+       * step to next block to scan;
+       * in reverse mode, we scan block from end to start.
+       * decrement cursor for every one step.
+       */
+      void advance_to_next_block();
 
       /**
-       * load next sstable block data into ObSSTableBlockScanner;
+       * load current block data into ObSSTableBlockScanner
+       * but skip empty blocks which not contains data  in 
+       * query range.
        */
       int fetch_next_block();
 
       /**
-       * fetch next batch block from block index cache
-       * next to end of current index array 
+       * load current block data into ObSSTableBlockScanner
+       * and advance iterate cursor to next block until stop.
        */
-      int fetch_next_batch_block_position();
+      int load_current_block_and_advance();
+
 
       /**
        * get block data from block cache, if not hit, read from disk.
        */
-      int get_block_data(const ObBlockPositionInfo &pos, 
-          const char* &sstable_block_data_ptr, int64_t &sstable_block_data_size);
+      int read_current_block_data(const char* &block_data_ptr, int64_t &block_data_size);
+
+      
+      /**
+       * find block indexes in query range.
+       */
+      int search_block_index(const bool first_time);
 
       /**
        * translate column id into column index in sstable row.
@@ -132,8 +148,9 @@ namespace oceanbase
         ITERATE_NOT_INITIALIZED = 1,
         ITERATE_NOT_START,
         ITERATE_IN_PROGRESS,
+        ITERATE_LAST_BLOCK,
+        ITERATE_NEED_FORWARD,
         ITERATE_IN_ERROR,
-        ITERATE_WILL_STOP,
         ITERATE_END
       };
       

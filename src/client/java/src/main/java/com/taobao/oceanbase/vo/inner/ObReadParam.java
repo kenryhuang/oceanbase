@@ -19,7 +19,7 @@ public class ObReadParam {
 		this.isReadMaster = isReadConsistency ? 1 : 0;
 	}
 	
-	protected long isReadConsistency() {
+	public long isReadConsistency() {
 		return isReadMaster;
 	}
 

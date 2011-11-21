@@ -275,6 +275,65 @@ int ObCommonRpcStub::slave_quit(const common::ObServer& master, const common::Ob
   return err;
 }
 
+int ObCommonRpcStub :: get_obi_role(const common::ObServer& rs, common::ObiRole &obi_role, const int64_t timeout_us)
+{
+  int err = OB_SUCCESS;
+
+  ObDataBuffer data_buff;
+
+  if (NULL == client_mgr_)
+  {
+    TBSYS_LOG(WARN, "invalid status, client_mgr_[%p]", client_mgr_);
+    err = OB_ERROR;
+  }
+  else
+  {
+    err = get_thread_buffer_(data_buff);
+  }
+
+  // step 1. send get obi role request
+  if (OB_SUCCESS == err)
+  {
+    err = client_mgr_->send_request(rs, 
+        OB_GET_OBI_ROLE, DEFAULT_VERSION, timeout_us, data_buff);
+    if (err != OB_SUCCESS)
+    {
+      TBSYS_LOG(ERROR, "send get obi role failed, err[%d].", err);
+    }
+  }
+
+  // step 2. deserialize the ObObiRole and response code
+  int64_t pos = 0;
+  if (OB_SUCCESS == err)
+  {
+    ObResultCode result_code;
+    err = result_code.deserialize(data_buff.get_data(), data_buff.get_position(), pos);
+    if (OB_SUCCESS != err)
+    {
+      TBSYS_LOG(ERROR, "deserialize result_code failed:pos[%ld], err[%d].", pos, err);
+    }
+    else
+    {
+      err = result_code.result_code_;
+      if (OB_SUCCESS != err)
+      {
+        TBSYS_LOG(ERROR, "get obi response error, err=%d", err);
+      }
+    }
+  }
+
+  if (OB_SUCCESS == err)
+  {
+    err = obi_role.deserialize(data_buff.get_data(), data_buff.get_position(), pos);
+    if (OB_SUCCESS != err)
+    {
+      TBSYS_LOG(ERROR, "deserialize ObObiRole failed:pos[%ld], err[%d].", pos, err);
+    }
+  }
+
+  return err;
+}
+
 int ObCommonRpcStub :: get_thread_buffer_(ObDataBuffer& data_buff)
 {
   int err = OB_SUCCESS;

@@ -26,6 +26,7 @@ namespace oceanbase
   {
     struct ObBlockPositionInfos;
     class ObBlockCache;
+    class ObBufferHandle;
 
     enum ObAIOBufferState 
     {
@@ -368,7 +369,27 @@ namespace oceanbase
       void set_state(ObDoubleAIOBufferState state);
       void set_stop(bool& stop, const int ret);
       
+      int reset_both_aio_buffer();
       int set_aio_buf_block_info(const int64_t aio_buf_idx, const bool check_cache);
+      int cur_aio_buf_add_block(
+        bool& cur_range_assign, const int64_t block_idx, 
+        const int64_t block_size, const int64_t total_size, 
+        const bool check_cache, const bool reverse_scan,
+        ObBufferHandle& buffer_handle);
+      int preread_aio_buf_add_block(
+        const bool cur_range_assign, bool& preread_range_assign,
+        const int64_t block_idx, const int64_t block_size, 
+        int64_t& preread_size, const bool check_cache, 
+        const bool reverse_scan, ObBufferHandle& buffer_handle);
+      int do_first_block_noexist_in_cache(
+        bool& cur_range_assign, bool& preread_range_assign,
+        bool& check_cache, const int64_t block_idx, 
+        const bool reverse_scan);
+      int do_all_blocks_in_cache(const bool cur_range_assign, 
+                                 const bool preread_range_assign,
+                                 const bool check_cache, const bool reverse_scan);
+      void do_either_aio_buf_assigned(const int64_t total_size, const bool reverse_scan);
+      void do_only_cur_aio_buf_assigned(const bool check_cache, const bool reverse_scan);
       int internal_init_read_range(const bool read_cache = false, 
                                    const bool reverse_scan = false);
       int init_read_range();

@@ -9,6 +9,10 @@ LDADD=$(top_builddir)/src/common/libcommon.a \
 
 AM_LDFLAGS=-lnuma -lpthread -lc -lm  -lgtest ${GCOV_LIB}
 CXXFLAGS=-D__STDC_LIMIT_MACROS -g -Wall #-fprofile-arcs -ftest-coverage
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_PROGRAMS=hash_benz \
 			 test_hashmap \

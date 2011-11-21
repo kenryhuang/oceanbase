@@ -18,7 +18,8 @@
 #include "common/ob_cache.h"
 #include "common/ob_scanner.h"
 #include "common/ob_action_flag.h"
-#include <iostream>
+//#include <iostream>
+
 using namespace oceanbase;
 using namespace oceanbase::common;
 using namespace oceanbase::mergeserver;
@@ -71,18 +72,33 @@ int oceanbase::mergeserver::ObMergeJoinAgent::set_request_param(const ObGetParam
 
 int oceanbase::mergeserver::ObMergeJoinAgent::get_cell(oceanbase::common::ObCellInfo * *cell)
 {
-  return (NULL == req_agent_) ? OB_ERROR : req_agent_->get_cell(cell);
+  int err = OB_INNER_STAT_ERROR;
+  if (NULL != req_agent_)
+  {
+    err = req_agent_->get_cell(cell);
+  }
+  return err;
 }
 
 int oceanbase::mergeserver::ObMergeJoinAgent::get_cell(oceanbase::common::ObCellInfo * *cell,
                                                        bool *is_row_changed)
 {
-  return (NULL == req_agent_) ? OB_ERROR : req_agent_->get_cell(cell,is_row_changed);
+  int err = OB_INNER_STAT_ERROR;
+  if (NULL != req_agent_)
+  {
+    err = req_agent_->get_cell(cell,is_row_changed);
+  }
+  return err;
 }
 
 int oceanbase::mergeserver::ObMergeJoinAgent::next_cell()
 {
-  return (NULL == req_agent_) ? OB_ERROR : req_agent_->next_cell();
+  int err = OB_INNER_STAT_ERROR;
+  if (NULL != req_agent_)
+  {
+    err = req_agent_->next_cell();
+  }
+  return err;
 }
 
 void oceanbase::mergeserver::ObMergeJoinAgent::clear()

@@ -57,6 +57,27 @@ int ObMergerTabletLocationList::sort(const ObServer & server)
   return ret;
 }
 
+void ObMergerTabletLocationList::set_item_valid(const int64_t timestamp)
+{
+  timestamp_ = timestamp;
+  for (int64_t i = 0; i < cur_count_; ++i)
+  {
+    locations_[i].err_times_ = 0;
+  }
+}
+
+int64_t ObMergerTabletLocationList::get_valid_count(void) const
+{
+  int64_t ret = 0;
+  for (int64_t i = 0; i < cur_count_; ++i)
+  {
+    if (locations_[i].err_times_ < ObMergerTabletLocation::MAX_ERR_TIMES)
+    {
+      ++ret;
+    }
+  }
+  return ret;
+}
 
 int ObMergerTabletLocationList::set_item_invalid(const ObMergerTabletLocation & location)
 {

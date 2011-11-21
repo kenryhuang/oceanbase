@@ -33,6 +33,7 @@ namespace oceanbase
       error_ = ERROR_CODE_OK;
       next_handle_ = NULL;
       old_value_ = NULL;
+      old_key_ = NULL;
       prev_root_pointer_ = NULL;
       key_allocator_ = NULL;
       node_allocator_ = NULL;
@@ -339,6 +340,14 @@ namespace oceanbase
     char *BtreeWriteHandle::get_old_value()
     {
       return old_value_;
+    }
+
+    /**
+    * 得到old_key
+    */
+    char *BtreeWriteHandle::get_old_key()
+    {
+      return old_key_;
     }
 
     /**

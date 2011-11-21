@@ -38,6 +38,8 @@ bool is_equal(const ObScanParam & one, const ObScanParam & two)
   {
     bret = (one.get_table_id() == two.get_table_id())
       && (one.get_table_name() == two.get_table_name())
+      && (one.get_is_result_cached() == two.get_is_result_cached())
+      && (one.get_is_read_consistency() == two.get_is_read_consistency())
       // && (*one.get_range() == *two.get_range())
       && (one.get_scan_size() == two.get_scan_size())
       && (one.get_scan_direction() == two.get_scan_direction())
@@ -173,6 +175,7 @@ TEST(TestScanParam, serialize_int)
   ObScanParam param;
   // cache
   param.set_is_result_cached(true);
+  param.set_is_read_consistency(false);
   param.set_scan_direction(ObScanParam::BACKWARD); 
   // version
   ObVersionRange range;
@@ -241,6 +244,12 @@ TEST(TestScanParam, serialize_int)
   new_pos = 0;
   EXPECT_TRUE(OB_SUCCESS == temp_param.deserialize(temp, size, new_pos));
   EXPECT_TRUE(pos == new_pos);
+  
+  EXPECT_TRUE(param.get_is_result_cached() == true);
+  EXPECT_TRUE(temp_param.get_is_result_cached() == true);
+  EXPECT_TRUE(temp_param.get_is_read_consistency() == false);
+  EXPECT_TRUE(param.get_is_read_consistency() == false);
+  
   // same as each other
   EXPECT_TRUE(is_equal(temp_param, param));
   EXPECT_TRUE(is_equal(param, temp_param));
@@ -346,6 +355,12 @@ TEST(TestScanParam, serialize_string)
   new_pos = 0;
   EXPECT_TRUE(OB_SUCCESS == temp_param.deserialize(temp, size, new_pos));
   EXPECT_TRUE(pos == new_pos);
+  
+  EXPECT_TRUE(param.get_is_result_cached() == false);
+  EXPECT_TRUE(temp_param.get_is_result_cached() == false);
+  EXPECT_TRUE(temp_param.get_is_read_consistency() == true);
+  EXPECT_TRUE(param.get_is_read_consistency() == true);
+  
   // same as each other
   EXPECT_TRUE(is_equal(temp_param, param));
   EXPECT_TRUE(is_equal(param, temp_param));

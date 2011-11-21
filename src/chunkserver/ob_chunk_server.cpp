@@ -137,6 +137,11 @@ namespace oceanbase
       return param_;
     }
 
+    ObChunkServerParam & ObChunkServer::get_param() 
+    {
+      return param_;
+    }
+
     ObChunkServerStatManager & ObChunkServer::get_stat_manager()
     {
       return stat_;
@@ -216,6 +221,11 @@ namespace oceanbase
       if (OB_SUCCESS == ret)
       {
         ret = set_thread_count(param_.get_task_thread_count());
+      }
+
+      if (OB_SUCCESS == ret)
+      {
+        ret = set_min_left_time(param_.get_task_left_time());
       }
 
       // set packet factory object.

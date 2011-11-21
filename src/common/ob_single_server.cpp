@@ -19,7 +19,7 @@ namespace oceanbase
 {
   namespace common
   {
-    ObSingleServer::ObSingleServer() : thread_count_(0), task_queue_size_(100)
+    ObSingleServer::ObSingleServer() : thread_count_(0), task_queue_size_(100), min_left_time_(0)
     {
     }
 
@@ -50,6 +50,21 @@ namespace oceanbase
         default_task_queue_thread_.stop();
         wait_for_queue();
       }
+    }
+
+    int ObSingleServer::set_min_left_time(const int64_t left_time)
+    {
+      int ret = OB_SUCCESS;
+      if (left_time < 0)
+      {
+        ret = OB_ERROR;
+        TBSYS_LOG(WARN, "left time should positive, you provide: %ld", left_time);
+      }
+      else
+      {
+        min_left_time_ = left_time;
+      }
+      return ret;
     }
 
     int ObSingleServer::set_thread_count(const int thread_count)
@@ -152,16 +167,17 @@ namespace oceanbase
       UNUSED(args);
       ObPacket* req = (ObPacket*) packet;
       int64_t source_timeout = req->get_source_timeout();
-      
+
       bool ret = false;
       if (source_timeout > 0)
       {
         int64_t receive_time = req->get_receive_ts();
         int64_t current_ts = tbsys::CTimeUtil::getTime();
-        if ((current_ts - receive_time) > source_timeout)
+        if ((current_ts - receive_time) + min_left_time_ > source_timeout)
         {
-          TBSYS_LOG(WARN, "packet block for %ld(us), exceed timeout: %ld(us), packet id: %d, dropped", 
-              (current_ts - receive_time), source_timeout, packet->getPCode());
+          TBSYS_LOG(WARN, "packet block time: %ld(us), plus min left time: %ld(us) "
+              "exceed timeout: %ld(us), packet id: %d, dropped", 
+              (current_ts - receive_time), min_left_time_, source_timeout, packet->getPCode());
           ret = true; 
         }
       }
@@ -170,7 +186,10 @@ namespace oceanbase
       {
         handle_request(req);
       }
-
+      else
+      {
+        handle_timeout_packet(req);
+      }
       return ret;
     }
 
@@ -179,9 +198,9 @@ namespace oceanbase
       if (request == NULL)
       {
         TBSYS_LOG(WARN, "handle a NULL packet");
-      } else
+      }
+      else
       {
-
         int ret = do_request(request);
         if (ret != OB_SUCCESS)
         {
@@ -194,6 +213,11 @@ namespace oceanbase
     {
       UNUSED(base_packet);
       return false;
+    }
+
+    void ObSingleServer::handle_timeout_packet(ObPacket* base_packet)
+    {
+      UNUSED(base_packet);
     }
 
   } /* common */

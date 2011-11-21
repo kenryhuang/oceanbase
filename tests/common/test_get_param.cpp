@@ -403,6 +403,8 @@ namespace oceanbase
         ObGetParam des_get_param;
         ObCellInfo* cell = NULL;
         int64_t pos = 0;
+        get_param.set_is_result_cached(false);
+        get_param.set_is_read_consistency(false);
 
         for (int j = 0; j < 10; ++j)
         {
@@ -423,6 +425,8 @@ namespace oceanbase
         ret = des_get_param.deserialize(serialize_buf, SERIALIZE_BUF_SIZE, pos);
         EXPECT_EQ(OB_SUCCESS, ret);
         EXPECT_EQ(pos, des_get_param.get_serialize_size());
+        EXPECT_EQ(false, des_get_param.get_is_result_cached());
+        EXPECT_EQ(false, des_get_param.get_is_read_consistency());
 
         EXPECT_EQ(50, des_get_param.get_cell_size());
         EXPECT_EQ(10, des_get_param.get_row_size());
@@ -446,6 +450,8 @@ namespace oceanbase
         ObVersionRange ver_range;
         ObCellInfo* cell = NULL;
         int64_t pos = 0;
+        //
+        get_param.set_is_result_cached(false);
 
         for (int j = 0; j < ROW_NUM; ++j)
         {
@@ -490,6 +496,8 @@ namespace oceanbase
         ret = des_get_param.deserialize(serialize_buf, SERIALIZE_BUF_SIZE, pos);
         EXPECT_EQ(OB_SUCCESS, ret);
         EXPECT_EQ(pos, des_get_param.get_serialize_size());
+        EXPECT_EQ(false, des_get_param.get_is_result_cached());
+        EXPECT_EQ(true, des_get_param.get_is_read_consistency());
 
         EXPECT_EQ(ROW_NUM * COL_NUM, des_get_param.get_cell_size());
         EXPECT_EQ(ROW_NUM, des_get_param.get_row_size());

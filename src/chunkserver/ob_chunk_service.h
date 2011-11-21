@@ -141,6 +141,13 @@ namespace oceanbase
             common::ObDataBuffer& in_buffer, 
             common::ObDataBuffer& out_buffer);
 
+        int cs_reload_conf(
+            const int32_t version,
+            const int32_t channel_id,
+            tbnet::Connection* connection, 
+            common::ObDataBuffer& in_buffer, 
+            common::ObDataBuffer& out_buffer);
+
       private:
         class LeaseChecker : public common::ObTimerTask 
         {
@@ -168,13 +175,28 @@ namespace oceanbase
         class MergeTask : public common::ObTimerTask
         {
           public:
-            MergeTask (ObChunkService* service) : service_(service) {}
+            MergeTask (ObChunkService* service) 
+              : frozen_version_(0), task_scheduled_(false), service_(service)  {}
           public:
-            int64_t get_last_frozen_version() const;
-            void set_frozen_version(int64_t version);
+            inline int64_t get_last_frozen_version() const { return frozen_version_; }
+            void set_frozen_version(int64_t version) { frozen_version_ = version; }
+            inline bool is_scheduled() const { return task_scheduled_; }
+            inline void set_scheduled() { task_scheduled_ = true; }
+            inline void unset_scheduled() { task_scheduled_ = false; }
             virtual void runTimerTask();
           private:
             int64_t frozen_version_;
+            bool task_scheduled_;
+            ObChunkService* service_;
+        };
+
+        class FetchUpsTask : public common::ObTimerTask
+        {
+          public:
+            FetchUpsTask (ObChunkService* service) : service_(service) {}
+          public:
+            virtual void runTimerTask();
+          private:
             ObChunkService* service_;
         };
 
@@ -200,6 +222,7 @@ namespace oceanbase
         LeaseChecker lease_checker_;
         StatUpdater  stat_updater_;
         MergeTask    merge_task_;
+        FetchUpsTask fetch_ups_task_;
     };
 
 

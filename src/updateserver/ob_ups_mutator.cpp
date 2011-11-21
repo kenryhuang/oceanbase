@@ -74,6 +74,28 @@ namespace oceanbase
       return err;
     }
 
+    int ObUpsMutator :: set_first_start()
+    {
+      int err = OB_SUCCESS;
+
+      if (NORMAL_FLAG != flag_)
+      {
+        TBSYS_LOG(WARN, "invalid status, flag_=%d", flag_);
+        err = OB_ERROR;
+      }
+      else
+      {
+        flag_ = START_FLAG;
+      }
+
+      return err;
+    }
+
+    bool ObUpsMutator :: is_normal_mutator() const
+    {
+      return flag_ == NORMAL_FLAG;
+    }
+    
     bool ObUpsMutator :: is_freeze_memtable() const
     {
       return flag_ == FREEZE_FLAG;
@@ -82,6 +104,11 @@ namespace oceanbase
     bool ObUpsMutator :: is_drop_memtable() const
     {
       return flag_ == DROP_FLAG;
+    }
+
+    bool ObUpsMutator :: is_first_start() const
+    {
+      return flag_ == START_FLAG;
     }
 
     void ObUpsMutator :: set_mutate_timestamp(const int64_t timestamp)

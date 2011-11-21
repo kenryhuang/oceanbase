@@ -199,7 +199,7 @@ TEST(TestObFile, normal)
   ObString str_fname;
   str_fname.assign(fname, strlen(fname));
 
-  int ret = appender.open(str_fname, true, true, true);
+  int ret = appender.open(str_fname, false, true, true);
   EXPECT_EQ(OB_SUCCESS, ret);
   ret = reader.open(str_fname, false);
   EXPECT_EQ(OB_SUCCESS, ret);

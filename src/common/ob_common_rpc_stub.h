@@ -24,6 +24,7 @@
 #include "thread_buffer.h"
 #include "ob_packet.h"
 #include "ob_lease_common.h"
+#include "ob_obi_role.h"
 
 namespace oceanbase
 {
@@ -52,6 +53,8 @@ namespace oceanbase
         // send quit info to Master, called when Slave quit
         virtual int slave_quit(const common::ObServer& master, const common::ObServer& slave_addr,
             const int64_t timeout_us);
+
+        virtual int get_obi_role(const common::ObServer& rs, common::ObiRole &obi_role, const int64_t timeout_us);
       private:
         int get_thread_buffer_(ObDataBuffer& data_buff);
 

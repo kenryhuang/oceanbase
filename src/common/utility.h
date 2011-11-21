@@ -37,6 +37,7 @@ namespace oceanbase
     bool all_zero(const char *buffer, const int64_t size);
     bool all_zero_small(const char *buffer, const int64_t size);
     char* str_trim(char *str);
+    void databuff_printf(char *buf, const int64_t buf_len, int64_t& pos, const char* fmt, ...);
   } // end namespace common
 } // end namespace oceanbase
 

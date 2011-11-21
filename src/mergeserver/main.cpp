@@ -31,7 +31,6 @@ int main(int argc, char *argv[])
   int rc = OB_SUCCESS;
   mallopt(M_MMAP_MAX, DEFAULT_MMAP_MAX_VAL); 
   ob_init_memory_pool();
-  
   BaseMain* mergeServer = ObMergeServerMain::get_instance();
   if (NULL == mergeServer)
   {
@@ -40,6 +39,7 @@ int main(int argc, char *argv[])
   }
   else
   {
+    srand(time(NULL)); 
     rc = mergeServer->start(argc, argv, "merge_server");
   }
   

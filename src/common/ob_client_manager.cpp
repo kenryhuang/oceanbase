@@ -259,7 +259,7 @@ namespace oceanbase
           send_ok = wait_object->wait(timeout);
           if (!send_ok)
           {
-            TBSYS_LOG(ERROR, "wait packet (%d)'s response timeout.",packet->get_packet_code());
+            TBSYS_LOG(WARN, "wait packet (%d)'s response timeout.",packet->get_packet_code());
             rc = OB_RESPONSE_TIME_OUT;
           }
           else

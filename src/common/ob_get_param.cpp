@@ -476,45 +476,25 @@ namespace oceanbase
                                           int64_t& pos) const
     {
       int ret                       = OB_SUCCESS;
-      ObVersionRange version_range  = get_version_range();
-
       if (NULL == buf || buf_len <= 0 || pos > buf_len)
       {
         TBSYS_LOG(WARN, "invalid param, buf=%p, buf_len=%ld, pos=%ld", 
                   buf, buf_len, pos);
         ret = OB_INVALID_ARGUMENT;
       }
-
+      
       //serialize basic field flag
       if (OB_SUCCESS == ret)
       {
         ret = serialize_flag(buf, buf_len, pos, ObActionFlag::BASIC_PARAM_FIELD);
       }
-
-      //serialize is_cached
+      
+      /// READ_PARAM
       if (OB_SUCCESS == ret)
       {
-        ret = serialize_int(buf, buf_len, pos, get_is_result_cached());
+        ret = ObReadParam::serialize(buf, buf_len, pos);
       }
-
-      //serialize border_flag
-      if (OB_SUCCESS == ret)
-      {
-        ret = serialize_int(buf, buf_len, pos, version_range.border_flag_.get_data());
-      }
-
-      //serialize start_version
-      if (OB_SUCCESS == ret)
-      {
-        ret = serialize_int(buf, buf_len, pos, version_range.start_version_);
-      }
-
-      //serialize end_version
-      if (OB_SUCCESS == ret)
-      {
-        ret = serialize_int(buf, buf_len, pos, version_range.end_version_);
-      }
-
+      
       return ret;
     }
 
@@ -522,77 +502,24 @@ namespace oceanbase
                                             const int64_t data_len, int64_t& pos)
     {
       int ret                 = OB_SUCCESS;
-      int64_t is_cached       = 0;
-      int64_t flag            = 0;
-      int64_t version         = 0;
-      ObVersionRange version_range;
-
       if (NULL == buf || data_len <= 0 || pos > data_len)
       {
         TBSYS_LOG(WARN, "invalid param, buf=%p, data_len=%ld, pos=%ld", 
                   buf, data_len, pos);
         ret = OB_INVALID_ARGUMENT;
       }
-
-      //deserialize is_cached
-      if (OB_SUCCESS == ret)
+      else
       {
-        ret = deserialize_int(buf, data_len, pos, is_cached);
-        if (OB_SUCCESS == ret && is_cached < 2)
-        {
-          set_is_result_cached(is_cached);
-        }
+        ret = ObReadParam::deserialize(buf, data_len, pos);
       }
-
-      //deserialize border_flag
-      if (OB_SUCCESS == ret)
-      {
-        ret = deserialize_int(buf, data_len, pos, flag);
-        if (OB_SUCCESS == ret)
-        {
-          version_range.border_flag_.set_data(static_cast<int8_t>(flag));
-        }
-      }
-
-      //deserialize start_version
-      if (OB_SUCCESS == ret)
-      {
-        ret = deserialize_int(buf, data_len, pos, version);
-        if (OB_SUCCESS ==ret)
-        {
-          version_range.start_version_ = version;
-        }
-      }
-
-      //deserialize end_version
-      if (OB_SUCCESS == ret)
-      {
-        ret = deserialize_int(buf, data_len, pos, version);
-        if (OB_SUCCESS ==ret)
-        {
-          version_range.end_version_ = version;
-        }
-      }
-
-      if (OB_SUCCESS == ret)
-      {
-        set_version_range(version_range);
-      }
-
       return ret;
     }
 
     int64_t ObGetParam::get_basic_field_serialize_size(void) const
     {
       int64_t total_size = 0;
-      ObVersionRange version_range = get_version_range();
-
       total_size += get_obj_serialize_size(ObActionFlag::BASIC_PARAM_FIELD, true);
-      total_size += get_obj_serialize_size(get_is_result_cached(), false);
-      total_size += get_obj_serialize_size(version_range.border_flag_.get_data(), false);
-      total_size += get_obj_serialize_size(version_range.start_version_, false);
-      total_size += get_obj_serialize_size(version_range.end_version_, false);
-
+      total_size += ObReadParam::get_serialize_size();
       return total_size;
     }
 
@@ -1015,6 +942,12 @@ namespace oceanbase
                   buf, buf_len, pos);
         ret = OB_INVALID_ARGUMENT;
       }
+      
+      //serialize reserve parameter field
+      if (OB_SUCCESS == ret)
+      {
+        ret = ObReadParam::serialize_reserve_param(buf, buf_len, pos);
+      }
 
       //serialize basic parameter field
       if (OB_SUCCESS == ret)
@@ -1086,6 +1019,14 @@ namespace oceanbase
             ext_val = obj.get_ext();
             switch (ext_val)
             {
+            case ObActionFlag::RESERVE_PARAM_FIELD:
+              /**
+               * NOTE : this function will deserialize the next one obj(1),
+               * and these obj is read master the data is in the parent class for
+               * protocol compatibility
+               */
+              ret = ObReadParam::deserialize_reserve_param(buf, data_len, pos);
+              break;
             case ObActionFlag::BASIC_PARAM_FIELD:
               /**
                * NOTE: this funtion will deserialize the next several objs(4),
@@ -1190,6 +1131,7 @@ namespace oceanbase
       int64_t total_size = 0;
 
       total_size += get_basic_field_serialize_size();
+      total_size += ObReadParam::get_reserve_param_serialize_size();
       total_size += get_obj_serialize_size(ObActionFlag::TABLE_PARAM_FIELD, true);
       total_size += get_cells_serialize_size();
       total_size += get_obj_serialize_size(ObActionFlag::END_PARAM_FIELD, true);

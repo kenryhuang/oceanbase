@@ -23,21 +23,26 @@ using namespace oceanbase::common;
 
 namespace
 {
-  const char* OBMS_MS_SECTION = "merge_server";
-  const char *OBMS_RS_SECTION = "root_server";
-  const char* OBMS_PORT = "port";
-  const char *OBMS_VIP = "vip";
-  const char* OBMS_DEVNAME = "dev_name";
-  const char* OBMS_TASK_QUEUE_SIZE = "task_queue_size"; 
-  const char* OBMS_TASK_THREAD_COUNT = "task_thread_count";
-  const char* OBMS_NETWORK_TIMEOUT = "network_timeout_us";
-  const char* OBMS_LEASE_INTERVAL = "lease_interval_us";
-  const char* OBMS_MONITOR_INTERVAL = "monitor_interval_us";
-  const char* OBMS_RETRY_TIMES = "retry_times";
-  const char *OBMS_LOCATION_CACHE_SIZE = "location_cache_size_mb";
-  const char *OBMS_LOCATION_CACHE_TIMEOUT = "location_cache_timeout_us";
-  const char *OBMS_INTERMEDIATE_BUFFER_SIZE = "intermediate_buffer_size_mbyte";
-  const char *OBMS_MEMORY_SIZE_LIMIG_PERCENT="memory_size_limit_percent";
+  const char * OBMS_MS_SECTION = "merge_server";
+  const char * OBMS_RS_SECTION = "root_server";
+  const char * OBMS_PORT = "port";
+  const char * OBMS_VIP = "vip";
+  const char * OBMS_DEVNAME = "dev_name";
+  const char * OBMS_RETRY_TIMES = "retry_times";
+  const char * OBMS_TASK_QUEUE_SIZE = "task_queue_size";
+  const char * OBMS_TASK_THREAD_COUNT = "task_thread_count";
+  const char * OBMS_TASK_LEFT_TIME = "task_left_time_us";
+  const char * OBMS_NETWORK_TIMEOUT = "network_timeout_us";
+  const char * OBMS_LEASE_INTERVAL = "lease_interval_us";
+  const char * OBMS_MONITOR_INTERVAL = "monitor_interval_us";
+  const char * OBMS_UPSLIST_INTERVAL = "upslist_interval_us";
+  const char * OBMS_BLACKLIST_TIMEOUT = "blacklist_timeout_us";
+  const char * OBMS_BLACKLIST_FAIL_COUNT = "blacklist_fail_count";
+  const char * OBMS_LOCATION_CACHE_SIZE = "location_cache_size_mb";
+  const char * OBMS_LOCATION_CACHE_TIMEOUT = "location_cache_timeout_us";
+  const char * OBMS_INTERMEDIATE_BUFFER_SIZE = "intermediate_buffer_size_mbyte";
+  const char * OBMS_MEMORY_SIZE_LIMIG_PERCENT = "memory_size_limit_percent";
+  const char * OBMS_ALLOW_RETURN_UNCOMPLETE_RESULT = "allow_return_uncomplete_result";
   const int64_t OB_MS_MAX_MEMORY_SIZE_LIMIT = 80;
   const int64_t OB_MS_MIN_MEMORY_SIZE_LIMIT = 10;
 }
@@ -105,6 +110,16 @@ namespace oceanbase
 
       if (ret == OB_SUCCESS)
       {
+        task_left_time_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_TASK_LEFT_TIME, 100 * 1000);
+        if (task_left_time_ < 0)
+        {
+          TBSYS_LOG(ERROR, "task left time must >= 0, got (%d)", task_left_time_);
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+
+      if (ret == OB_SUCCESS)
+      {
         network_time_out_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_NETWORK_TIMEOUT, 2000);
         if (network_time_out_ <= 0)
         {
@@ -112,7 +127,37 @@ namespace oceanbase
           ret = OB_INVALID_ARGUMENT;
         }
       }
-      
+
+      if (ret == OB_SUCCESS)
+      {
+        ups_blacklist_timeout_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_BLACKLIST_TIMEOUT, 60 * 1000 * 1000L);
+        if (ups_blacklist_timeout_ <= 0)
+        {
+          TBSYS_LOG(ERROR, "ups in blacklist timeout must > 0, got (%ld)", ups_blacklist_timeout_);
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+
+      if (ret == OB_SUCCESS)
+      {
+        ups_fail_count_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_BLACKLIST_FAIL_COUNT, 20); 
+        if (ups_fail_count_ <= 0)
+        {
+          TBSYS_LOG(ERROR, "ups fail count into blacklist must > 0, got (%ld)", ups_fail_count_);
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+
+      if (ret == OB_SUCCESS)
+      {
+        fetch_ups_interval_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_UPSLIST_INTERVAL, 60 * 1000 * 1000L);
+        if (fetch_ups_interval_<= 0)
+        {
+          TBSYS_LOG(ERROR, "fetch ups list interval time must > 0, got (%ld)", fetch_ups_interval_);
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+
       if (ret == OB_SUCCESS)
       {
         check_lease_interval_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_LEASE_INTERVAL, 6 * 1000 * 1000L);
@@ -132,7 +177,7 @@ namespace oceanbase
           ret = OB_INVALID_ARGUMENT;
         }
       }
-      
+
       if (ret == OB_SUCCESS)
       {
         retry_times_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_RETRY_TIMES, 3);
@@ -143,7 +188,7 @@ namespace oceanbase
         }
       }
 
-      if(OB_SUCCESS == ret)
+      if (OB_SUCCESS == ret)
       {
         location_cache_timeout_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_LOCATION_CACHE_TIMEOUT, 1000 * 1000 * 600L);
         if (location_cache_timeout_ <= 0)
@@ -159,7 +204,7 @@ namespace oceanbase
         if (location_cache_size_ <= 0)
         {
           TBSYS_LOG(ERROR, "tablet location cache size should great than 0 got (%d)", 
-                    location_cache_size_);
+            location_cache_size_);
           ret = OB_INVALID_ARGUMENT;
         }
       }
@@ -180,9 +225,19 @@ namespace oceanbase
 
       if (ret == OB_SUCCESS)
       {
+        allow_return_uncomplete_result_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_ALLOW_RETURN_UNCOMPLETE_RESULT, 0);
+        if ((allow_return_uncomplete_result_ != 0) && (allow_return_uncomplete_result_ != 1))
+        {
+          TBSYS_LOG(ERROR, "allow_return_uncomplete_result must 0 or 1 it's [%d]", allow_return_uncomplete_result_);
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+
+      if (ret == OB_SUCCESS)
+      {
         memory_size_limit_ = TBSYS_CONFIG.getInt(OBMS_MS_SECTION, OBMS_MEMORY_SIZE_LIMIG_PERCENT, 15);
         if (memory_size_limit_ < OB_MS_MIN_MEMORY_SIZE_LIMIT
-            || OB_MS_MAX_MEMORY_SIZE_LIMIT < memory_size_limit_)
+          || OB_MS_MAX_MEMORY_SIZE_LIMIT < memory_size_limit_)
         {
           TBSYS_LOG(ERROR, "memory_size_limit_percent between [%d,%d], got (%d)", 
             OB_MS_MIN_MEMORY_SIZE_LIMIT,
@@ -201,7 +256,7 @@ namespace oceanbase
     }
 
     int ObMergeServerParams::load_string(char* dest, const int32_t size,
-                                         const char* section, const char* name, bool require)
+      const char* section, const char* name, bool require)
     {
       int ret = OB_SUCCESS;
       if (NULL == dest || 0 >= size || NULL == section || NULL == name)
@@ -225,7 +280,7 @@ namespace oceanbase
         if ((int32_t)strlen(value) >= size)
         {
           TBSYS_LOG(ERROR, "%s.%s too long, length (%ld) > %d", 
-                    section, name, strlen(value), size);
+            section, name, strlen(value), size);
           ret = OB_SIZE_OVERFLOW;
         }
         else
@@ -243,12 +298,20 @@ namespace oceanbase
       TBSYS_LOG(INFO, "listen port => %d", server_listen_port_);
       TBSYS_LOG(INFO, "device name => %s", dev_name_);
       TBSYS_LOG(INFO, "task queue size => %d", task_queue_size_);
+      TBSYS_LOG(INFO, "task min left time => %ld", task_left_time_);
       TBSYS_LOG(INFO, "task thread count => %d", task_thread_count_);
       TBSYS_LOG(INFO, "network time out => %ld", network_time_out_);
+      TBSYS_LOG(INFO, "timeout retry times => %ld", retry_times_);
+      TBSYS_LOG(INFO, "check lease time interval => %ld", check_lease_interval_);
+      TBSYS_LOG(INFO, "monitor time interval => %ld", monitor_interval_);
+      TBSYS_LOG(INFO, "fetch ups list time interval => %ld", fetch_ups_interval_);
+      TBSYS_LOG(INFO, "ups fail count into blacklist => %ld", ups_fail_count_);
+      TBSYS_LOG(INFO, "ups blacklist time out => %ld", ups_blacklist_timeout_);
       TBSYS_LOG(INFO, "tablet location cache size in Mbyte => %d", location_cache_size_);
       TBSYS_LOG(INFO, "tablet location cache time out in ms => %ld", location_cache_timeout_);
-      TBSYS_LOG(INFO, "rootserver address => %s:%d", root_server_ip_, root_server_port_);  
+      TBSYS_LOG(INFO, "rootserver address => %s:%d", root_server_ip_, root_server_port_);
       TBSYS_LOG(INFO, "memory size limit => %ld", memory_size_limit_);
+      TBSYS_LOG(INFO, "allow_return_uncomplete_result => %d", allow_return_uncomplete_result_);
     }
 
   } /* mergeserver */

@@ -472,6 +472,36 @@ namespace oceanbase
       }
       btr.clear();
     }
+
+    TEST(KeyBtreeTest, put_overwrite)
+    {
+      KeyBtree<KeyInfo, int> btr(sizeof(KeyInfo));
+      KeyInfo k1(10, 1);
+      KeyInfo k2(10, 2);
+      KeyInfo key(1, 1);
+      int value, old_value;
+      EXPECT_EQ(btr.put(k1, 100), ERROR_CODE_OK);
+      EXPECT_EQ(btr.put(k2, 101, true), ERROR_CODE_OK);
+      {
+        BtreeReadHandle handle;
+        btr.get_read_handle(handle);
+        btr.set_key_range(handle, btr.get_min_key(), 0, btr.get_max_key(), 0);
+        EXPECT_EQ(btr.get_next(handle, key, value), ERROR_CODE_OK);
+        EXPECT_EQ(value, 101);
+        EXPECT_EQ(key.b_, 1);
+      }
+      // overwrite key
+      EXPECT_EQ(btr.put(k2, 102, old_value, true, true), ERROR_CODE_OK);
+      {
+        BtreeReadHandle handle;
+        btr.get_read_handle(handle);
+        btr.set_key_range(handle, btr.get_min_key(), 0, btr.get_max_key(), 0);
+        EXPECT_EQ(btr.get_next(handle, key, value), ERROR_CODE_OK);
+        EXPECT_EQ(old_value, 101);
+        EXPECT_EQ(value, 102);
+        EXPECT_EQ(key.b_, 2);
+      }
+    }
   } // end namespace common
 } // end namespace oceanbase
 

@@ -139,6 +139,55 @@ int ObMergerRpcStub::find_server(const int64_t timeout, const ObServer & root_se
   return ret;
 }
 
+int ObMergerRpcStub::fetch_server_list(const int64_t timeout, const ObServer & root_server,
+    ObUpsList & server_list) const
+{
+  int ret = OB_SUCCESS;
+  ObDataBuffer data_buff;
+  ret = get_rpc_buffer(data_buff);
+  // step 1. send get update server list info request
+  if (OB_SUCCESS == ret)
+  {
+    ret = rpc_frame_->send_request(root_server, OB_GET_UPS, DEFAULT_VERSION,
+        timeout, data_buff);
+    if (ret != OB_SUCCESS)
+    {
+      TBSYS_LOG(WARN, "send request to root server for find update server failed:ret[%d]", ret);
+    }
+  }
+
+  // step 2. deserialize restult code
+  int64_t pos = 0;
+  if (OB_SUCCESS == ret)
+  {
+    ObResultCode result_code;
+    ret = result_code.deserialize(data_buff.get_data(), data_buff.get_position(), pos);
+    if (OB_SUCCESS != ret)
+    {
+      TBSYS_LOG(ERROR, "deserialize result_code failed:pos[%ld], ret[%d]", pos, ret);
+    }
+    else
+    {
+      ret = result_code.result_code_;
+    }
+  }
+
+  // step 3. deserialize update server addr
+  if (OB_SUCCESS == ret)
+  {
+    ret = server_list.deserialize(data_buff.get_data(), data_buff.get_position(), pos);
+    if (ret != OB_SUCCESS)
+    {
+      TBSYS_LOG(ERROR, "deserialize server list failed:pos[%ld], ret[%d]", pos, ret);
+    }
+    else
+    {
+      TBSYS_LOG(DEBUG, "fetch update server list succ:count[%d]", server_list.ups_count_);
+    }
+  }
+  return ret;
+}
+
 // heartbeat rpc through register server interface
 int ObMergerRpcStub::heartbeat_server(const int64_t timeout, const ObServer & root_server,
     const ObServer & merge_server, const ObRole server_role) const
@@ -507,6 +556,12 @@ int ObMergerRpcStub::get(const int64_t timeout, ObMergerTabletLocationList & lis
   }
   else
   {
+    // set all invlaid item to valid status
+    if (list.get_valid_count() < 1)
+    {
+      list.set_item_valid(tbsys::CTimeUtil::getTime());
+    }
+
     ret = OB_CHUNK_SERVER_ERROR;
     for (int32_t i = 0; i < list.size(); ++i)
     {
@@ -563,6 +618,12 @@ int ObMergerRpcStub::scan(const int64_t timeout, ObMergerTabletLocationList & li
   }
   else
   {
+    // set all invlaid item to valid status
+    if (list.get_valid_count() < 1)
+    {
+      list.set_item_valid(tbsys::CTimeUtil::getTime());
+    }
+
     ret = OB_CHUNK_SERVER_ERROR;
     for (int32_t i = 0; i < list.size(); ++i)
     {
@@ -575,22 +636,23 @@ int ObMergerRpcStub::scan(const int64_t timeout, ObMergerTabletLocationList & li
       ret = scan(timeout, list[i].server_.chunkserver_, scan_param, scanner);
       if (OB_CS_TABLET_NOT_EXIST == ret)
       {
-        TBSYS_LOG(WARN, "check chunk server position failed:ret[%d]", ret); 
+        TBSYS_LOG(WARN, "check chunk server position failed:pos[%d], count[%ld], ret[%d]",
+            i, list.size(), ret);
         list[i].err_times_ = ObMergerTabletLocation::MAX_ERR_TIMES;
         update_list = true;
         continue;
       }
       else if (ret != OB_SUCCESS)
       {
-        TBSYS_LOG(WARN, "scan from chunk server failed:ret[%d]", ret);
+        TBSYS_LOG(WARN, "scan from chunk server failed:pos[%d], count[%ld], ret[%d]",
+            i, list.size(), ret);
         ++list[i].err_times_;
         update_list = true;
         continue;
       }
       else
       {
-        TBSYS_LOG(DEBUG, "scan from chunk server succ:port[%d], pos[%d]", 
-            list[i].server_.chunkserver_.get_port(), i);
+        TBSYS_LOG(DEBUG, "scan from chunk server succ:pos[%d], count[%ld]", i, list.size());
         if (list[i].err_times_ != 0)
         {
           list[i].err_times_ = 0;
@@ -617,6 +679,8 @@ int ObMergerRpcStub::fetch_tablet_location(const int64_t timeout, const ObServer
   cell.row_key_ = row_key;
   
   ObGetParam get_param;
+  get_param.set_is_result_cached(false);
+  get_param.set_is_read_consistency(false);
   int ret = get_param.add_cell(cell);
   if (ret != OB_SUCCESS)
   {

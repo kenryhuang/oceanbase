@@ -242,6 +242,70 @@ TEST(ObGroupByParam, function)
   EXPECT_TRUE(all_in_one_group_agg_operator[1].value_== agg_count_obj);
 }
 
+TEST(ObGroupByParam, row_change)
+{
+  ObGroupByParam param;
+  ObGroupByOperator groupby_operator;
+  int64_t groupby_idx =  0;
+  int64_t agg_idx = 1;
+  ObAggregateFuncType agg_func = SUM;
+  EXPECT_EQ(param.add_groupby_column(groupby_idx), OB_SUCCESS);
+  EXPECT_EQ(param.add_aggregate_column(agg_idx, agg_func),OB_SUCCESS);
+  ObStringBuf buffer;
+  ObString str;
+  const char *c_str = NULL;
+  ObCellInfo org_cell_info;
+  ObCellArray org_cells;
+  ObCellInfo  *cell_out;
+  ObString table_name;
+  c_str = "table";
+  str.assign((char*)c_str, strlen(c_str));
+  EXPECT_EQ(buffer.write_string(str,&(table_name)), OB_SUCCESS);
+  org_cell_info.table_name_ = table_name;
+
+  c_str = "abc";
+  str.assign((char*)c_str, strlen(c_str));
+  EXPECT_EQ(buffer.write_string(str,&(org_cell_info.row_key_)), OB_SUCCESS);
+
+  int groupby_one_val = 1;
+  org_cell_info.value_.set_int(groupby_one_val);
+  EXPECT_EQ(org_cells.append(org_cell_info, cell_out),OB_SUCCESS);
+  EXPECT_EQ(org_cells.append(org_cell_info, cell_out),OB_SUCCESS);
+
+  int groupby_two_val = 2;
+  c_str = "def";
+  str.assign((char*)c_str, strlen(c_str));
+  EXPECT_EQ(buffer.write_string(str,&(org_cell_info.row_key_)), OB_SUCCESS); 
+  org_cell_info.value_.set_int(groupby_two_val);
+  EXPECT_EQ(org_cells.append(org_cell_info, cell_out),OB_SUCCESS);
+  EXPECT_EQ(org_cells.append(org_cell_info, cell_out),OB_SUCCESS);
+
+  EXPECT_EQ(groupby_operator.init(param,1024*1024*10), OB_SUCCESS);
+  EXPECT_EQ(groupby_operator.add_row(org_cells,0,1), OB_SUCCESS);
+  EXPECT_EQ(groupby_operator.add_row(org_cells, 2,3), OB_SUCCESS);
+
+  EXPECT_EQ(groupby_operator.get_cell_size(), 4);
+
+  bool is_row_changed = false;
+  EXPECT_EQ(groupby_operator.next_cell(), OB_SUCCESS);
+  EXPECT_EQ(groupby_operator.get_cell(&cell_out, &is_row_changed), OB_SUCCESS);
+  EXPECT_TRUE(is_row_changed);
+
+  EXPECT_EQ(groupby_operator.next_cell(), OB_SUCCESS);
+  EXPECT_EQ(groupby_operator.get_cell(&cell_out, &is_row_changed), OB_SUCCESS);
+  EXPECT_FALSE(is_row_changed);
+
+  EXPECT_EQ(groupby_operator.next_cell(), OB_SUCCESS);
+  EXPECT_EQ(groupby_operator.get_cell(&cell_out, &is_row_changed), OB_SUCCESS);
+  EXPECT_TRUE(is_row_changed);
+
+  EXPECT_EQ(groupby_operator.next_cell(), OB_SUCCESS);
+  EXPECT_EQ(groupby_operator.get_cell(&cell_out, &is_row_changed), OB_SUCCESS);
+  EXPECT_FALSE(is_row_changed);
+
+  EXPECT_EQ(groupby_operator.next_cell(), OB_ITER_END);
+}
+
 int main(int argc, char **argv)
 {
   srandom(time(NULL));

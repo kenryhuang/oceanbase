@@ -7,10 +7,9 @@
  * 
  * Version: $Id$
  *
- * ob_root_server2.cpp for ...
  *
  * Authors:
- *   daoan <daoan@taobao.com>
+ *    zhuweng.yzk <zhuweng.yzk@taobao.com>
  *
  */
 
@@ -25,402 +24,637 @@
 #include "common/ob_define.h"
 #include "common/ob_action_flag.h"
 #include "common/ob_atomic.h"
-
+#include "common/utility.h"
 #include "rootserver/ob_root_server2.h"
 #include "rootserver/ob_root_worker.h"
-namespace 
+#include "rootserver/ob_root_stat_key.h"
+
+using oceanbase::common::databuff_printf;
+
+namespace oceanbase
+{
+namespace rootserver
 {
   const char* STR_SECTION_ROOT_SERVER = "root_server";
   const char* STR_SECTION_UPDATE_SERVER = "update_server";
-  const char* STR_IP = "vip";
-  const char* STR_PORT = "port";
-  const char* STR_UPS_INNER_PORT = "ups_inner_port";
+  const char* STR_SECTION_OB_INSTANCES = "ob_instances";
+  const char* STR_SECTION_CLIENT = "client";
 
-  const char* STR_SECTION_SCHEMA_INFO = "schema";
-  const char* STR_FILE_NAME = "file_name";
-  const char* STR_SECTION_CHUNK_SERVER = "chunk_server";
-  const char* STR_LEASE = "lease";
-  const char* STR_MIGRATE_WAIT_SECONDS = "migrate_wait_seconds";
-  const char* STR_SAFE_LOST_ONE_DURATION = "safe_lost_one_duration";
-  const char* STR_SAFE_WAIT_INIT_DURATION= "wait_init_duration";
-  const char* STR_MAX_MERGE_DURATION= "max_merge_duration";
-  const char* STR_CS_COMMAND_INTERVAL= "cs_command_interval_us";
-  const char* STR_DISK_HIGH_LEVEL = "disk_high_level";
-  const char* STR_DISK_TRIGGER_LEVEL = "disk_trigger_level";
-  const char* STR_SHARED_ADJACENT = "shared_adjacent";
-  const char* STR_SAFE_COPY_COUNT_IN_INIT = "__safe_copy_count_in_init";
-  const char* STR_SAFE_COPY_COUNT_IN_MERGE = "__safe_copy_count_in_merge";
-  const char* STR_CREATE_TABLE_IN_INIT = "__create_table_in_init";
-const char* STR_TABLET_REPLICAS_NUM = "tablet_replicas_num";
+   const char* STR_IP = "vip";
+   const char* STR_PORT = "port";
+   const char* STR_UPS_INNER_PORT = "ups_inner_port";
 
-  const int WAIT_SECONDS = 1;
-  const int PACKAGE_TIME_OUT = 1;
-  const int SLAVE_SLEEP_TIME = 1 * 1000; // 1 ms
-  //const int64_t REMAIN_TIME = 1000000 * 500;  //500s
-  const int RETURN_BACH_COUNT = 8;
-  const int MAX_RETURN_BACH_ROW_COUNT = 1000;
+   const char* STR_SECTION_SCHEMA_INFO = "schema";
+   const char* STR_FILE_NAME = "file_name";
+   const char* STR_SECTION_CHUNK_SERVER = "chunk_server";
+   const char* STR_LEASE = "lease";
+   const char* STR_MIGRATE_WAIT_SECONDS = "migrate_wait_seconds";
+   const char* STR_SAFE_LOST_ONE_DURATION = "safe_lost_one_duration";
+   const char* STR_SAFE_WAIT_INIT_DURATION= "wait_init_duration";
+   const char* STR_MAX_MERGE_DURATION= "max_merge_duration";
+   const char* STR_CS_COMMAND_INTERVAL= "cs_command_interval_us";
+   const char* STR_SAFE_COPY_COUNT_IN_INIT = "__safe_copy_count_in_init";
+   const char* STR_SAFE_COPY_COUNT_IN_MERGE = "__safe_copy_count_in_merge";
+   const char* STR_CREATE_TABLE_IN_INIT = "__create_table_in_init";
+   const char* STR_TABLET_REPLICAS_NUM = "tablet_replicas_num";
+   const char* STR_UPS_COUNT = "ups_count";
+   const char* STR_OBI_COUNT = "obi_count";
+   const char* STR_BNL_ALPHA = "BNL_alpha";
+   const char* STR_BNL_ALPHA_DENOMINATOR = "BNL_alpha_denominator";
+   const char* STR_BNL_THRESHOLD = "BNL_threshold";
+   const char* STR_BNL_THRESHOLD_DENOMINATOR = "BNL_threshold_denominator";
+  const char* STR_BALANCE_TOLERANCE = "balance_tolerance";
+  const char* STR_MAX_CONCURRENT_MIGRATE = "max_concurrent_migrate_per_cs";
+  const char* STR_MAX_BATCH_MIGRATE_OUT_PER_CS = "max_batch_migrate_out_per_cs";
+  const char* STR_ENABLE_BALANCE = "__enable_balance";
+  const char* STR_ENABLE_REREPLICATION = "__enable_rereplication";
+  const char* STR_MAX_BATCH_MIGRATE_TIMEOUT = "max_batch_migrate_timeout";
+  const char* STR_BALANCE_WORKER_IDLE_SLEEP_SEC = "balance_worker_idle_sleep_sec";
+  
+   const int WAIT_SECONDS = 1;
+   const int PACKAGE_TIME_OUT = 1;
+   const int SLAVE_SLEEP_TIME = 1 * 1000; // 1 ms
+   //const int64_t REMAIN_TIME = 1000000 * 500;  //500s
+   const int RETURN_BACH_COUNT = 8;
+   const int MAX_RETURN_BACH_ROW_COUNT = 1000;
+  const int DEFAULT_BALANCE_TOLERANCE = 10;
+  const int MIN_BALANCE_TOLERANCE = 3;
+  const int64_t DEFAULT_BALANCE_TIMEOUT_US_DELTA = 10*1000*1000; // 10s
+  const int32_t DEFAULT_MAX_CONCURRENT_MIGRATE = 2;
+  const int32_t DEFAULT_MAX_MIGRATE_OUT_PER_CS = 20;
+  const int32_t DEFAULT_MAX_MIGRATE_TIMEOUT = 600; // 10min
+  const int32_t DEFAULT_BALANCE_WORKER_IDLE_SLEEP_SEC = 30; // 30s
 
-  const char* ROOT_1_PORT =   "1_port";
-  const char* ROOT_1_MS_PORT =   "1_ms_port";
-  const char* ROOT_1_IPV6_1 = "1_ipv6_1";
-  const char* ROOT_1_IPV6_2 = "1_ipv6_2";
-  const char* ROOT_1_IPV6_3 = "1_ipv6_3";
-  const char* ROOT_1_IPV6_4 = "1_ipv6_4";
-  const char* ROOT_1_IPV4   = "1_ipv4";
-  const char* ROOT_1_TABLET_VERSION= "1_tablet_version";
+   const char* ROOT_1_PORT =   "1_port";
+   const char* ROOT_1_MS_PORT =   "1_ms_port";
+   const char* ROOT_1_IPV6_1 = "1_ipv6_1";
+   const char* ROOT_1_IPV6_2 = "1_ipv6_2";
+   const char* ROOT_1_IPV6_3 = "1_ipv6_3";
+   const char* ROOT_1_IPV6_4 = "1_ipv6_4";
+   const char* ROOT_1_IPV4   = "1_ipv4";
+   const char* ROOT_1_TABLET_VERSION= "1_tablet_version";
 
-  const char* ROOT_2_PORT =   "2_port";
-  const char* ROOT_2_MS_PORT =   "2_ms_port";
-  const char* ROOT_2_IPV6_1 = "2_ipv6_1";
-  const char* ROOT_2_IPV6_2 = "2_ipv6_2";
-  const char* ROOT_2_IPV6_3 = "2_ipv6_3";
-  const char* ROOT_2_IPV6_4 = "2_ipv6_4";
-  const char* ROOT_2_IPV4   = "2_ipv4";
-  const char* ROOT_2_TABLET_VERSION= "2_tablet_version";
+   const char* ROOT_2_PORT =   "2_port";
+   const char* ROOT_2_MS_PORT =   "2_ms_port";
+   const char* ROOT_2_IPV6_1 = "2_ipv6_1";
+   const char* ROOT_2_IPV6_2 = "2_ipv6_2";
+   const char* ROOT_2_IPV6_3 = "2_ipv6_3";
+   const char* ROOT_2_IPV6_4 = "2_ipv6_4";
+   const char* ROOT_2_IPV4   = "2_ipv4";
+   const char* ROOT_2_TABLET_VERSION= "2_tablet_version";
 
-  const char* ROOT_3_PORT =   "3_port";
-  const char* ROOT_3_MS_PORT =   "3_ms_port";
-  const char* ROOT_3_IPV6_1 = "3_ipv6_1";
-  const char* ROOT_3_IPV6_2 = "3_ipv6_2";
-  const char* ROOT_3_IPV6_3 = "3_ipv6_3";
-  const char* ROOT_3_IPV6_4 = "3_ipv6_4";
-  const char* ROOT_3_IPV4   = "3_ipv4";
-  const char* ROOT_3_TABLET_VERSION= "3_tablet_version";
+   const char* ROOT_3_PORT =   "3_port";
+   const char* ROOT_3_MS_PORT =   "3_ms_port";
+   const char* ROOT_3_IPV6_1 = "3_ipv6_1";
+   const char* ROOT_3_IPV6_2 = "3_ipv6_2";
+   const char* ROOT_3_IPV6_3 = "3_ipv6_3";
+   const char* ROOT_3_IPV6_4 = "3_ipv6_4";
+   const char* ROOT_3_IPV4   = "3_ipv4";
+   const char* ROOT_3_TABLET_VERSION= "3_tablet_version";
 
-  const char* ROOT_OCCUPY_SIZE ="occupy_size";
-  const char* ROOT_RECORD_COUNT ="record_count";
-  const char* ROOT_CRC_SUM ="crc_sum";
+   const char* ROOT_OCCUPY_SIZE ="occupy_size";
+   const char* ROOT_RECORD_COUNT ="record_count";
+   const char* ROOT_CRC_SUM ="crc_sum";
 
-  char max_row_key[oceanbase::common::OB_MAX_ROW_KEY_LENGTH];  
+   char max_row_key[oceanbase::common::OB_MAX_ROW_KEY_LENGTH];  
 
 
-  const int ADD_ERROR = -1;
-  const int ADD_OK = 0;
-  const int SHOULD_DO_MIGRATE = 1;
-  const int CAN_NOT_FIND_SUTABLE_SERVER = 2;
+   const int ADD_ERROR = -1;
+   const int ADD_OK = 0;
+   const int SHOULD_DO_MIGRATE = 1;
+   const int CAN_NOT_FIND_SUTABLE_SERVER = 2;
 
-  const int MIGRATE_WAIT_SECONDS = 60;
+   const int MIGRATE_WAIT_SECONDS = 60;
 
-  const int NO_REPORTING = 0;
-  const int START_REPORTING = 1;
+   const int NO_REPORTING = 0;
+   const int START_REPORTING = 1;
 
-  const int HB_RETRY_FACTOR = 100 * 1000;
-  const int MAX_TRIGEER_WAIT_SECONDS = 60 * 30;  
+   const int HB_RETRY_FACTOR = 100 * 1000;
+   const int MAX_TRIGEER_WAIT_SECONDS = 60 * 30;
+ }
 }
-namespace oceanbase 
-{ 
-  namespace rootserver 
-  {
-    const int ObRootServer2::STATUS_INIT;
-    const int ObRootServer2::STATUS_NEED_REPORT;
-    const int ObRootServer2::STATUS_NEED_BUILD;
-    const int ObRootServer2::STATUS_CHANGING;
-    const int ObRootServer2::STATUS_NEED_BALANCE;
-    const int ObRootServer2::STATUS_BALANCING;
-    const int ObRootServer2::STATUS_SLEEP;
-    const int ObRootServer2::STATUS_INTERRUPT_BALANCING;
-    const char* ObRootServer2::ROOT_TABLE_EXT = "rtable";
-    const char* ObRootServer2::CHUNKSERVER_LIST_EXT = "clist";
 
-    using namespace common;
-    ObRootServer2::ObRootServer2()
-      :ups_inner_port_(0),lease_duration_(0), schema_manager_(NULL), 
-      root_table_for_query_(NULL), tablet_manager_for_query_(NULL),
-      root_table_for_build_(NULL), tablet_manager_for_build_(NULL), 
-      have_inited_(false), new_table_created_(false), migrate_wait_seconds_(0),
-      server_status_(STATUS_INIT), build_sync_flag_(BUILD_SYNC_FLAG_NONE), 
-      safe_lost_one_duration_(0), wait_init_time_(1000L * 1000L * 60),
-      max_merge_duration_(1000L * 1000L * 7200),cs_merge_command_interval_mseconds_(60 * 1000L * 1000L),
-      first_cs_had_registed_(false), receive_stop_(false), drop_this_build_(false), 
-      safe_copy_count_in_init_(2), safe_copy_count_in_merge_(2),create_table_in_init_(0),
-      last_frozen_mem_version_(-1), pre_frozen_mem_version_(-1),last_frozen_time_(0),
-       tablet_replicas_num_(DEFAULT_TABLET_REPLICAS_NUM),
-       root_table_modifier_(this), balance_worker_(this), heart_beat_checker_(this)
-    {
-      worker_ = NULL;
-      log_worker_ = NULL;
-      time_stamp_changing_ = -1;
-      frozen_mem_version_ = -1;
-      config_file_name_[0] = '\0';
-      schema_file_name_[0] = '\0';
-    }
-    ObRootServer2::~ObRootServer2()
-    {
-      receive_stop_ = true;
-      heart_beat_checker_.stop();
-      heart_beat_checker_.wait();
-      balance_worker_.stop();
-      balance_worker_.wait();
-      root_table_modifier_.stop();
-      root_table_modifier_.wait();
-      if (schema_manager_)
-      {
-        delete schema_manager_;
-        schema_manager_ = NULL;
-      }
-      if (root_table_for_query_)
-      {
-        delete root_table_for_query_;
-        root_table_for_query_= NULL;
-      }
-      if (root_table_for_build_)
-      {
-        delete root_table_for_build_;
-        root_table_for_build_ = NULL;
-      }
-      if (tablet_manager_for_query_)
-      {
-        delete tablet_manager_for_query_;
-        tablet_manager_for_query_ = NULL;
-      }
-      if (tablet_manager_for_build_)
-      {
-        delete tablet_manager_for_build_;
-        tablet_manager_for_build_ = NULL;
-      }
-      have_inited_ = false;
-    }
-    bool ObRootServer2::init(const char* config_file_name, const int64_t now, OBRootWorker* worker)
-    {
-      bool res = true;
-      worker_ = worker;
-      log_worker_ = worker_->get_log_manager()->get_log_worker();
+ namespace oceanbase 
+ { 
+   namespace rootserver 
+   {
+     const int ObRootServer2::STATUS_INIT;
+     const int ObRootServer2::STATUS_NEED_REPORT;
+     const int ObRootServer2::STATUS_NEED_BUILD;
+     const int ObRootServer2::STATUS_CHANGING;
+     const int ObRootServer2::STATUS_NEED_BALANCE;
+     const int ObRootServer2::STATUS_BALANCING;
+     const int ObRootServer2::STATUS_SLEEP;
+     const int ObRootServer2::STATUS_INTERRUPT_BALANCING;
+     const char* ObRootServer2::ROOT_TABLE_EXT = "rtable";
+     const char* ObRootServer2::CHUNKSERVER_LIST_EXT = "clist";
 
-      if (have_inited_ == false && config_file_name != NULL)
-      {
-        schema_manager_ = new(std::nothrow)ObSchemaManagerV2(now);
-        TBSYS_LOG(INFO, "init schema_version=%ld", now);
-        if (schema_manager_ == NULL)
-        {
-          TBSYS_LOG(ERROR, "new ObSchemaManagerV2() error");
-          res = false;
-        }
-        if (res)
-        {
-          tablet_manager_for_query_ = new(std::nothrow)ObTabletInfoManager();
-          if (tablet_manager_for_query_ == NULL)
-          {
-            TBSYS_LOG(ERROR, "new ObTabletInfoManager error");
-            res = false;
-          }
-          else
-          {
-            root_table_for_query_ = new(std::nothrow)ObRootTable2(tablet_manager_for_query_);
-            TBSYS_LOG(INFO, "new root table created, root_table_for_query=%p", root_table_for_query_);
-            if (root_table_for_query_ == NULL) 
-            {
-              TBSYS_LOG(ERROR, "new ObRootTable2 error");
-              res = false;
-            }
-          }
-        }
-        strncpy(config_file_name_, config_file_name, OB_MAX_FILE_NAME_LENGTH);
-        config_file_name_[OB_MAX_FILE_NAME_LENGTH - 1] = '\0';
-        if (res)
-        {
-          res = reload_config(config_file_name_);
-        }
-        //this means if init failed, you should aband this ObRootServer2
-        //do not call init again. 
-        have_inited_ = true; 
-      }
-      else
-      {
-        if (have_inited_)
-        {
-          TBSYS_LOG(ERROR, "can not be inited again");
-        } 
-        else
-        {
-          TBSYS_LOG(ERROR, "config file name can not be empty");
-        }
-        res = false;
-      }
+     using namespace common;
+     ObRootServer2::ObRootServer2()
+       :ups_inner_port_(0),lease_duration_(0), schema_manager_(NULL), 
+       root_table_for_query_(NULL), tablet_manager_for_query_(NULL),
+       root_table_for_build_(NULL), tablet_manager_for_build_(NULL), 
+       have_inited_(false), new_table_created_(false), migrate_wait_seconds_(0),
+       server_status_(STATUS_INIT), build_sync_flag_(BUILD_SYNC_FLAG_NONE), 
+       safe_lost_one_duration_(0), wait_init_time_(1000L * 1000L * 60),
+       max_merge_duration_(1000L * 1000L * 7200),cs_merge_command_interval_mseconds_(60 * 1000L * 1000L),
+       first_cs_had_registed_(false), receive_stop_(false), drop_this_build_(false), 
+       safe_copy_count_in_init_(2), safe_copy_count_in_merge_(2),create_table_in_init_(0),
+       last_frozen_mem_version_(-1), pre_frozen_mem_version_(-1),last_frozen_time_(0),
+        tablet_replicas_num_(DEFAULT_TABLET_REPLICAS_NUM),
+        balance_worker_sleep_us_(MIN_BALANCE_WORKER_SLEEP_US), 
+        balance_worker_idle_sleep_us_(MIN_BALANCE_WORKER_SLEEP_US),
+        balance_tolerance_count_(0), balance_start_time_us_(0), 
+        balance_timeout_us_(0), balance_timeout_us_delta_(DEFAULT_BALANCE_TIMEOUT_US_DELTA),
+        balance_max_timeout_us_(0), balance_batch_migrate_count_(0),
+        balance_batch_migrate_done_num_(0), balance_select_dest_start_pos_(0), 
+        balance_max_concurrent_migrate_num_(0), balance_max_migrate_out_per_cs_(0), 
+        enable_balance_(1), enable_rereplication_(1), balance_testing_(false),
+        root_table_modifier_(this), balance_worker_(this), heart_beat_checker_(this)
+     {
+       worker_ = NULL;
+       log_worker_ = NULL;
+       time_stamp_changing_ = -1;
+       frozen_mem_version_ = -1;
+       config_file_name_[0] = '\0';
+       schema_file_name_[0] = '\0';
+       time(&start_time_);
+     }
+     ObRootServer2::~ObRootServer2()
+     {
+       if (schema_manager_)
+       {
+         delete schema_manager_;
+         schema_manager_ = NULL;
+       }
+       if (root_table_for_query_)
+       {
+         delete root_table_for_query_;
+         root_table_for_query_= NULL;
+       }
+       if (root_table_for_build_)
+       {
+         delete root_table_for_build_;
+         root_table_for_build_ = NULL;
+       }
+       if (tablet_manager_for_query_)
+       {
+         delete tablet_manager_for_query_;
+         tablet_manager_for_query_ = NULL;
+       }
+       if (tablet_manager_for_build_)
+       {
+         delete tablet_manager_for_build_;
+         tablet_manager_for_build_ = NULL;
+       }
+       have_inited_ = false;
+     }
+     bool ObRootServer2::init(const char* config_file_name, const int64_t now, OBRootWorker* worker)
+     {
+       bool res = true;
+       worker_ = worker;
+       log_worker_ = worker_->get_log_manager()->get_log_worker();
 
-      return res;
-    }
+       if (have_inited_ == false && config_file_name != NULL)
+       {
+         schema_manager_ = new(std::nothrow)ObSchemaManagerV2(now);
+         TBSYS_LOG(INFO, "init schema_version=%ld", now);
+         if (schema_manager_ == NULL)
+         {
+           TBSYS_LOG(ERROR, "new ObSchemaManagerV2() error");
+           res = false;
+         }
+         if (res)
+         {
+           tablet_manager_for_query_ = new(std::nothrow)ObTabletInfoManager();
+           if (tablet_manager_for_query_ == NULL)
+           {
+             TBSYS_LOG(ERROR, "new ObTabletInfoManager error");
+             res = false;
+           }
+           else
+           {
+             root_table_for_query_ = new(std::nothrow)ObRootTable2(tablet_manager_for_query_);
+             TBSYS_LOG(INFO, "new root table created, root_table_for_query=%p", root_table_for_query_);
+             if (root_table_for_query_ == NULL) 
+             {
+               TBSYS_LOG(ERROR, "new ObRootTable2 error");
+               res = false;
+             }
+           }
+         }
+         strncpy(config_file_name_, config_file_name, OB_MAX_FILE_NAME_LENGTH);
+         config_file_name_[OB_MAX_FILE_NAME_LENGTH - 1] = '\0';
+         if (res)
+         {
+           res = reload_config(config_file_name_);
+         }
+         //this means if init failed, you should aband this ObRootServer2
+         //do not call init again. 
+         have_inited_ = true; 
+       }
+       else
+       {
+         if (have_inited_)
+         {
+           TBSYS_LOG(ERROR, "can not be inited again");
+         } 
+         else
+         {
+           TBSYS_LOG(ERROR, "config file name can not be empty");
+         }
+         res = false;
+       }
 
-    void ObRootServer2::start_threads()
-    {
-      root_table_modifier_.start();
-      balance_worker_.start();
-      heart_beat_checker_.start();
-    }
+       return res;
+     }
 
-    bool ObRootServer2::reload_config(const char* config_file_name) 
-    {
-      int res = false;
-      if (config_file_name != NULL)
-      {
-        res = true;
-        tbsys::CConfig config;
-        if (res) 
-        {
-          if (EXIT_FAILURE == config.load(config_file_name))
-          {
-            TBSYS_LOG(ERROR, "load config file %s error", config_file_name);
-            res = false;
-          }
-        }
-        if (!have_inited_)
-        {
-          //update server info; schema; and vip only can be changed in the first time we load config file
-          if (res)
-          {
-            //get info of update server
-            const char* ip =  config.getString(STR_SECTION_UPDATE_SERVER, STR_IP, NULL);
-            int port = config.getInt(STR_SECTION_UPDATE_SERVER, STR_PORT, 0);
-            if (ip == NULL ||  0 == port || !update_server_status_.server_.set_ipv4_addr(ip, port))
-            {
-              TBSYS_LOG(ERROR, "load update server info error config file is %s ", config_file_name);
-              res = false;
-            }
-            update_server_status_.status_ = ObServerStatus::STATUS_SERVING;
+     void ObRootServer2::start_threads()
+     {
+       root_table_modifier_.start();
+       balance_worker_.start();
+       heart_beat_checker_.start();
+     }
 
-            if (res)
-            {
-              ups_inner_port_ = config.getInt(STR_SECTION_UPDATE_SERVER, STR_UPS_INNER_PORT, 0);
-              if (0 == ups_inner_port_)
-              {
-                TBSYS_LOG(ERROR, "load update server inner port error");
-                res = false;
-              }
-            }
-          }
-          UNUSED(STR_SECTION_ROOT_SERVER);
-          //if (res)
-          //{
-          //  //get root server's vip
-          //  const char* vip =  config.getString(STR_SECTION_ROOT_SERVER, STR_IP, NULL);
+     void ObRootServer2::stop_threads()
+     {
+       TBSYS_LOG(INFO, "stop threads");
+       receive_stop_ = true;
+       TBSYS_LOG(INFO, "stop flag set");
+       heart_beat_checker_.stop();
+       heart_beat_checker_.wait();
+       TBSYS_LOG(INFO, "heartbeat thread stopped");
+       balance_worker_.stop();
+       balance_worker_.wait();
+       TBSYS_LOG(INFO, "balance thread stopped");
+       root_table_modifier_.stop();
+       root_table_modifier_.wait();
+       TBSYS_LOG(INFO, "table_modifier thread stopped");
+     }
 
-          //}
-          if (res) 
-          {
-            //give schema file name
-            const char* schema_file_name = config.getString(STR_SECTION_SCHEMA_INFO, STR_FILE_NAME, NULL);
-            if (NULL == schema_file_name)
-            {
-              TBSYS_LOG(ERROR, "load schema file name error config file is %s ", config_file_name);
-              res = false;
-            }
-            else 
-            {
-              strncpy(schema_file_name_, schema_file_name, OB_MAX_FILE_NAME_LENGTH);
-              schema_file_name_[OB_MAX_FILE_NAME_LENGTH - 1] = '\0';
-            }
-          }
-          if (res)
-          {
-            // init schema manager
-            tbsys::CConfig config;
-            if (!schema_manager_->parse_from_file(schema_file_name_, config))
-            {
-              TBSYS_LOG(ERROR, "parse schema error chema file is %s ", schema_file_name_);
-              res = false;
-            }
-            else
-            {
-              TBSYS_LOG(INFO, "load schema from file, file=%s", schema_file_name_);
-            }
-          }
-        }
+     int ObRootServer2::load_ups_list(tbsys::CConfig &config)
+     {
+       int ret = OB_SUCCESS;
+       static const int MY_BUF_SIZE = 64;
+       char conf_key[MY_BUF_SIZE];
 
-        if (res)
-        {
-          const char* p = config.getString(STR_SECTION_CHUNK_SERVER, STR_LEASE, "10000000");
-          int64_t lease_duration = strtoll(p, NULL, 10);
-          if (lease_duration < 1000000)
-          {
-            TBSYS_LOG(ERROR, "lease duration %ld is unacceptable", lease_duration);
-            res = false;
-          }
-          else
-          {
-            lease_duration_ = lease_duration;
-          }
-        }
+       ups_list_.ups_count_ = config.getInt(STR_SECTION_UPDATE_SERVER, STR_UPS_COUNT, 0);
+       TBSYS_LOG(INFO, "loading ups count=%d", ups_list_.ups_count_);
+       for (int32_t i = 0; OB_SUCCESS == ret && i < ups_list_.ups_count_ && i < ups_list_.MAX_UPS_COUNT; ++i)
+       {
+         snprintf(conf_key, MY_BUF_SIZE, "ups%d_ip", i);
+         const char* ip =  config.getString(STR_SECTION_UPDATE_SERVER, conf_key, NULL);
+         snprintf(conf_key, MY_BUF_SIZE, "ups%d_port", i);
+         int port = config.getInt(STR_SECTION_UPDATE_SERVER, conf_key, 0);
+         snprintf(conf_key, MY_BUF_SIZE, "ups%d_inner_port", i);
+         int inner_port = config.getInt(STR_SECTION_UPDATE_SERVER, conf_key, 0);
+         snprintf(conf_key, MY_BUF_SIZE, "ups%d_ms_read_percentage", i);
+         int ms_read_percentage = config.getInt(STR_SECTION_UPDATE_SERVER, conf_key, -1);
+         snprintf(conf_key, MY_BUF_SIZE, "ups%d_cs_read_percentage", i);
+         int cs_read_percentage = config.getInt(STR_SECTION_UPDATE_SERVER, conf_key, -1);
+         if (!ups_list_.ups_array_[i].addr_.set_ipv4_addr(ip, port))
+         {
+           TBSYS_LOG(ERROR, "invalid ups addr, addr=%s port=%d", ip, port);
+           ret = OB_INVALID_ARGUMENT;
+         }
+         else if (0 >= inner_port)
+         {
+           TBSYS_LOG(ERROR, "invalid ups inner port, port=%d", inner_port);
+           ret = OB_INVALID_ARGUMENT;
+         }
+         else if (0 > ms_read_percentage || 100 < ms_read_percentage)
+         {
+           TBSYS_LOG(ERROR, "invalid ups ms_read_percentage=%d", ms_read_percentage);
+           ret = OB_INVALID_ARGUMENT;
+         }
+         else if (0 > cs_read_percentage || 100 < cs_read_percentage)
+         {
+           TBSYS_LOG(ERROR, "invalid ups cs_read_percentage=%d", cs_read_percentage);
+           ret = OB_INVALID_ARGUMENT;
+         }
+         else
+         {
+           ups_list_.ups_array_[i].inner_port_ = inner_port;
+           ups_list_.ups_array_[i].ms_read_percentage_ = ms_read_percentage;
+           ups_list_.ups_array_[i].cs_read_percentage_ = cs_read_percentage;
+         }
+       } // end for
 
-        if (res)
-        {
-          migrate_wait_seconds_ = config.getInt(STR_SECTION_ROOT_SERVER, STR_MIGRATE_WAIT_SECONDS, MIGRATE_WAIT_SECONDS);
-          if (migrate_wait_seconds_ < MIGRATE_WAIT_SECONDS )
-          {
-            TBSYS_LOG(WARN, "change migrate_wait_seconds to %d second(s)", MIGRATE_WAIT_SECONDS);
-            migrate_wait_seconds_ = MIGRATE_WAIT_SECONDS;
-          }
+       if (OB_SUCCESS == ret)
+       {
+         ups_list_.print();
+       }
+       return ret;
+     }
 
-          int64_t safe_lost_one_duration = config.getInt(STR_SECTION_CHUNK_SERVER, STR_SAFE_LOST_ONE_DURATION, 3600);
-          TBSYS_LOG(INFO, "safe lost one duration is %ld second(s)", safe_lost_one_duration);
-          safe_lost_one_duration_ = safe_lost_one_duration * 1000L * 1000L;
+     int ObRootServer2::load_client_config(tbsys::CConfig &config)
+     {
+       int ret = OB_SUCCESS;
+       static const int MY_BUF_SIZE = 64;
+       char conf_key[MY_BUF_SIZE];
+       client_config_.BNL_alpha_ = config.getInt(STR_SECTION_CLIENT, STR_BNL_ALPHA, 
+                                                 ObClientConfig::DEFAULT_BNL_ALPHA);
+       client_config_.BNL_alpha_denominator_ = config.getInt(STR_SECTION_CLIENT, STR_BNL_ALPHA_DENOMINATOR, 
+                                                             ObClientConfig::DEFAULT_BNL_ALPHA_DENOMINATOR);
+       client_config_.BNL_threshold_ = config.getInt(STR_SECTION_CLIENT, STR_BNL_THRESHOLD,
+                                                     ObClientConfig::DEFAULT_BNL_THRESHOLD);
+       client_config_.BNL_threshold_denominator_ = config.getInt(STR_SECTION_CLIENT, STR_BNL_THRESHOLD_DENOMINATOR, 
+                                                                 ObClientConfig::DEFAULT_BNL_THRESHOLD_DENOMINATOR);
+       client_config_.obi_list_.obi_count_ = config.getInt(STR_SECTION_OB_INSTANCES, STR_OBI_COUNT, 0);
+       TBSYS_LOG(INFO, "loading obi count=%d", client_config_.obi_list_.obi_count_);
+       int32_t loaded_count = 0;
+       for (int32_t i = 0; OB_SUCCESS == ret && i < client_config_.obi_list_.obi_count_ && i < client_config_.obi_list_.MAX_OBI_COUNT; ++i)
+       {
+         snprintf(conf_key, MY_BUF_SIZE, "obi%d_rs_vip", i);
+         const char* ip =  config.getString(STR_SECTION_OB_INSTANCES, conf_key, NULL);
+         snprintf(conf_key, MY_BUF_SIZE, "obi%d_rs_port", i);
+         int port = config.getInt(STR_SECTION_OB_INSTANCES, conf_key, 0);
+         snprintf(conf_key, MY_BUF_SIZE, "obi%d_read_percentage", i);
+         int read_percentage = config.getInt(STR_SECTION_OB_INSTANCES, conf_key, -1);
+         ObServer rs_addr;
+         if (!rs_addr.set_ipv4_addr(ip, port))
+         {
+           TBSYS_LOG(ERROR, "invalid ups addr, addr=%s port=%d", ip, port);
+           ret = OB_INVALID_ARGUMENT;
+         }
+         else if (0 > read_percentage || 100 < read_percentage)
+         {
+           TBSYS_LOG(ERROR, "invalid obi read_percentage=%d", read_percentage);
+           ret = OB_INVALID_ARGUMENT;
+         }
+         else
+         {
+           client_config_.obi_list_.conf_array_[i].set_rs_addr(rs_addr);
+           client_config_.obi_list_.conf_array_[i].set_read_percentage(read_percentage);
+           loaded_count++;
+         }
+       } // end for
+       client_config_.obi_list_.obi_count_ = loaded_count;
+       if (OB_SUCCESS == ret)
+       {
+         if (0 == loaded_count)
+         {
+           // no ob instances config, set myself as the only instance
+           client_config_.obi_list_.conf_array_[0].set_rs_addr(my_addr_);
+           client_config_.obi_list_.obi_count_ = 1;
+         }
+         else 
+         {
+           bool found_myself = false;
+           for (int i = 0; i < client_config_.obi_list_.obi_count_; ++i)
+           {
+             if (client_config_.obi_list_.conf_array_[i].get_rs_addr() == my_addr_)
+             {
+               found_myself = true;
+               break;
+             }
+           }
+           if (!found_myself)
+           {
+             TBSYS_LOG(ERROR, "this RS's address must be in the list of ob instances");
+             client_config_.obi_list_.print();
+             ret = OB_INVALID_ARGUMENT;
+           }
+         }
+       }
+       if (OB_SUCCESS == ret)
+       {
+         if (NULL != schema_manager_)
+         {
+           strcpy(client_config_.app_name_, schema_manager_->get_app_name());
+         }
+         client_config_.print();
+       }
+       return ret;
+     }
 
-          int64_t wait_init_time = config.getInt(STR_SECTION_CHUNK_SERVER, STR_SAFE_WAIT_INIT_DURATION, 60);
-          TBSYS_LOG(INFO, "wait_init_time is %ld second(s)", wait_init_time);
-          wait_init_time_ = wait_init_time * 1000L * 1000L;
+     bool ObRootServer2::reload_config(const char* config_file_name) 
+     {
+       int res = false;
+       if (config_file_name != NULL)
+       {
+         res = true;
+         tbsys::CConfig config;
+         if (res) 
+         {
+           if (EXIT_FAILURE == config.load(config_file_name))
+           {
+             TBSYS_LOG(ERROR, "load config file %s error", config_file_name);
+             res = false;
+           }
+         }
+         if (!have_inited_)
+         {
+           //update server info; schema; and vip only can be changed in the first time we load config file
+           if (res)
+           {
+             //get info of update server
+             const char* ip =  config.getString(STR_SECTION_UPDATE_SERVER, STR_IP, NULL);
+             int port = config.getInt(STR_SECTION_UPDATE_SERVER, STR_PORT, 0);
+             if (ip == NULL ||  0 == port || !update_server_status_.server_.set_ipv4_addr(ip, port))
+             {
+               TBSYS_LOG(ERROR, "load update server info error config file is %s ", config_file_name);
+               res = false;
+             }
+             update_server_status_.status_ = ObServerStatus::STATUS_SERVING;
 
-          int64_t max_merge_duration = config.getInt(STR_SECTION_CHUNK_SERVER, STR_MAX_MERGE_DURATION, 7200);
-          TBSYS_LOG(INFO, "max_merge_duration is %ld second(s)", max_merge_duration);
-          max_merge_duration_ = max_merge_duration * 1000L * 1000L;
+             if (res)
+             {
+               ups_inner_port_ = config.getInt(STR_SECTION_UPDATE_SERVER, STR_UPS_INNER_PORT, 0);
+               if (0 == ups_inner_port_)
+               {
+                 TBSYS_LOG(ERROR, "load update server inner port error");
+                 res = false;
+               }
+             }
+           }
+           UNUSED(STR_SECTION_ROOT_SERVER);
+           //if (res)
+           //{
+           //  //get root server's vip
+           //  const char* vip =  config.getString(STR_SECTION_ROOT_SERVER, STR_IP, NULL);
 
-          int64_t cs_merge_command_interval_mseconds = config.getInt(STR_SECTION_ROOT_SERVER, STR_CS_COMMAND_INTERVAL, 60 * 1000L * 1000L);
-          TBSYS_LOG(INFO, "cs_merge_command_interval_mseconds is %ld m_second(s)", cs_merge_command_interval_mseconds);
-          cs_merge_command_interval_mseconds_ = cs_merge_command_interval_mseconds;
+           //}
+           if (res) 
+           {
+             //give schema file name
+             const char* schema_file_name = config.getString(STR_SECTION_SCHEMA_INFO, STR_FILE_NAME, NULL);
+             if (NULL == schema_file_name)
+             {
+               TBSYS_LOG(ERROR, "load schema file name error config file is %s ", config_file_name);
+               res = false;
+             }
+             else 
+             {
+               strncpy(schema_file_name_, schema_file_name, OB_MAX_FILE_NAME_LENGTH);
+               schema_file_name_[OB_MAX_FILE_NAME_LENGTH - 1] = '\0';
+             }
+           }
+           if (res)
+           {
+             // init schema manager
+             tbsys::CConfig config;
+             if (!schema_manager_->parse_from_file(schema_file_name_, config))
+             {
+               TBSYS_LOG(ERROR, "parse schema error chema file is %s ", schema_file_name_);
+               res = false;
+             }
+             else
+             {
+               TBSYS_LOG(INFO, "load schema from file, file=%s", schema_file_name_);
+             }
+           }
+         }
 
+         if (res)
+         {
+           const char* p = config.getString(STR_SECTION_CHUNK_SERVER, STR_LEASE, "10000000");
+           int64_t lease_duration = strtoll(p, NULL, 10);
+           if (lease_duration < 1000000)
+           {
+             TBSYS_LOG(ERROR, "lease duration %ld is unacceptable", lease_duration);
+             res = false;
+           }
+           else
+           {
+             lease_duration_ = lease_duration;
+           }
+         }
 
-          int level = config.getInt(STR_SECTION_CHUNK_SERVER, STR_DISK_HIGH_LEVEL, 80);
-          if (level <= 0 || level > 99)
-          {
-            TBSYS_LOG(ERROR, "unacceptable value of disk_high_level %d change to %d", level, 80);
-            level = 80;
-          }
-          balance_prameter_.disk_high_level_ = level;
+         if (res)
+         {
+           migrate_wait_seconds_ = config.getInt(STR_SECTION_ROOT_SERVER, STR_MIGRATE_WAIT_SECONDS, MIGRATE_WAIT_SECONDS);
+           if (migrate_wait_seconds_ < MIGRATE_WAIT_SECONDS )
+           {
+             TBSYS_LOG(WARN, "change migrate_wait_seconds to %d second(s)", MIGRATE_WAIT_SECONDS);
+             migrate_wait_seconds_ = MIGRATE_WAIT_SECONDS;
+           }
 
-          level = config.getInt(STR_SECTION_CHUNK_SERVER, STR_DISK_TRIGGER_LEVEL, 70);
-          if (level <= 0 || level > balance_prameter_.disk_high_level_ )
-          {
-            TBSYS_LOG(ERROR, "unacceptable value of  disk_trigger_level_ %d change to %d", 
-                level, balance_prameter_.disk_high_level_);
-            level = balance_prameter_.disk_high_level_;
-          }
-          balance_prameter_.disk_trigger_level_ = level;
+           enable_balance_ = config.getInt(STR_SECTION_ROOT_SERVER, STR_ENABLE_BALANCE, 1);
+           TBSYS_LOG(INFO, "enable_balance=%d", enable_balance_);
+           enable_rereplication_ = config.getInt(STR_SECTION_ROOT_SERVER, STR_ENABLE_REREPLICATION, 1);
+           TBSYS_LOG(INFO, "enable_rereplication=%d", enable_rereplication_);
 
-          int shared_adjacent = config.getInt(STR_SECTION_CHUNK_SERVER, STR_SHARED_ADJACENT, 10);
+           int64_t safe_lost_one_duration = config.getInt(STR_SECTION_CHUNK_SERVER, STR_SAFE_LOST_ONE_DURATION, 3600);
+           TBSYS_LOG(INFO, "safe lost one duration is %ld second(s)", safe_lost_one_duration);
+           safe_lost_one_duration_ = safe_lost_one_duration * 1000L * 1000L;
 
-          int safe_copy_count_in_init = config.getInt(STR_SECTION_ROOT_SERVER, STR_SAFE_COPY_COUNT_IN_INIT, 2);
-          if (safe_copy_count_in_init > 0 && safe_copy_count_in_init <= OB_SAFE_COPY_COUNT)
-          {
-            safe_copy_count_in_init_ = safe_copy_count_in_init;
-          }
-          TBSYS_LOG(INFO, "safe_copy_count_in_init_=%d", safe_copy_count_in_init_);
-          int safe_copy_count_in_merge = config.getInt(STR_SECTION_ROOT_SERVER, STR_SAFE_COPY_COUNT_IN_MERGE, 2);
-          if (safe_copy_count_in_merge > 0 && safe_copy_count_in_merge <= OB_SAFE_COPY_COUNT)
-          {
-            safe_copy_count_in_merge_ = safe_copy_count_in_merge;
-          }
-          int tmp = config.getInt(STR_SECTION_ROOT_SERVER, STR_TABLET_REPLICAS_NUM, DEFAULT_TABLET_REPLICAS_NUM);
-          if (safe_copy_count_in_init_ > tmp)
-          {
-            TBSYS_LOG(ERROR, "tablet_replicas_num=%d safe_copy_count_in_init=%d", tmp, safe_copy_count_in_init_);
-            res = false;
-          }
-          else if (0 < tmp && OB_SAFE_COPY_COUNT >= tmp)
-          {
-            tablet_replicas_num_ = tmp;
-            TBSYS_LOG(INFO, "tablet_replicas_num=%d", tablet_replicas_num_);
-          }
-          else
-          {
-            TBSYS_LOG(WARN, "invalid tablet_replicas_num, num=%d", tmp);
-          }
-          create_table_in_init_ = config.getInt(STR_SECTION_ROOT_SERVER, STR_CREATE_TABLE_IN_INIT,0);
+           int64_t wait_init_time = config.getInt(STR_SECTION_CHUNK_SERVER, STR_SAFE_WAIT_INIT_DURATION, 60);
+           TBSYS_LOG(INFO, "wait_init_time is %ld second(s)", wait_init_time);
+           wait_init_time_ = wait_init_time * 1000L * 1000L;
 
-          if (shared_adjacent <= 0)
-          {
-            TBSYS_LOG(ERROR, "unacceptable value of  shared_adjacent_ %d change to %d", 
-                shared_adjacent, 10);
-            shared_adjacent = 10;
-          }
-          balance_prameter_.shared_adjacent_ = shared_adjacent;
-        }
+           int64_t max_merge_duration = config.getInt(STR_SECTION_CHUNK_SERVER, STR_MAX_MERGE_DURATION, 7200);
+           TBSYS_LOG(INFO, "max_merge_duration is %ld second(s)", max_merge_duration);
+           max_merge_duration_ = max_merge_duration * 1000L * 1000L;
+
+           int64_t cs_merge_command_interval_mseconds = config.getInt(STR_SECTION_ROOT_SERVER, STR_CS_COMMAND_INTERVAL, 60 * 1000L * 1000L);
+           TBSYS_LOG(INFO, "cs_merge_command_interval_mseconds is %ld m_second(s)", cs_merge_command_interval_mseconds);
+           cs_merge_command_interval_mseconds_ = cs_merge_command_interval_mseconds;
+
+           int64_t balance_tolerance = config.getInt(STR_SECTION_CHUNK_SERVER, STR_BALANCE_TOLERANCE,
+                                                     DEFAULT_BALANCE_TOLERANCE);
+           if (MIN_BALANCE_TOLERANCE <= balance_tolerance)
+           {
+             balance_tolerance_count_ = balance_tolerance;
+           }
+           else
+           {
+             balance_tolerance_count_ = MIN_BALANCE_TOLERANCE;
+           }
+           TBSYS_LOG(INFO, "balance_tolerance_=%ld", balance_tolerance_count_);
+
+           balance_max_concurrent_migrate_num_ = config.getInt(STR_SECTION_CHUNK_SERVER, STR_MAX_CONCURRENT_MIGRATE,
+                                                               DEFAULT_MAX_CONCURRENT_MIGRATE);
+           if (0 >= balance_max_concurrent_migrate_num_)
+           {
+             balance_max_concurrent_migrate_num_ = DEFAULT_MAX_CONCURRENT_MIGRATE;
+           }
+           TBSYS_LOG(INFO, "max_concurrent_migrate_per_cs=%d", balance_max_concurrent_migrate_num_);
+
+           balance_max_migrate_out_per_cs_ = config.getInt(STR_SECTION_CHUNK_SERVER, STR_MAX_BATCH_MIGRATE_OUT_PER_CS,
+                                                               DEFAULT_MAX_MIGRATE_OUT_PER_CS);
+           if (0 >= balance_max_migrate_out_per_cs_)
+           {
+             balance_max_migrate_out_per_cs_ = DEFAULT_MAX_MIGRATE_OUT_PER_CS;
+           }
+           TBSYS_LOG(INFO, "max_batch_migrate_out_per_cs=%d", balance_max_migrate_out_per_cs_);
+           int32_t max_migrate_timeout = config.getInt(STR_SECTION_CHUNK_SERVER, STR_MAX_BATCH_MIGRATE_TIMEOUT,
+                                                       DEFAULT_MAX_MIGRATE_TIMEOUT);
+           if (0 >= max_migrate_timeout)
+           {
+             max_migrate_timeout = DEFAULT_MAX_MIGRATE_TIMEOUT;
+           }
+           balance_max_timeout_us_ = max_migrate_timeout;
+           balance_max_timeout_us_ *= 1000*1000;
+           TBSYS_LOG(INFO, "max_migrate_timeout_us=%d", balance_max_timeout_us_);
+
+           int32_t balance_worker_idle_sleep_sec = config.getInt(STR_SECTION_ROOT_SERVER, STR_BALANCE_WORKER_IDLE_SLEEP_SEC,
+                                                                 DEFAULT_BALANCE_WORKER_IDLE_SLEEP_SEC);
+           if (0 >= balance_worker_idle_sleep_sec)
+           {
+             balance_worker_idle_sleep_sec = DEFAULT_BALANCE_WORKER_IDLE_SLEEP_SEC;
+           }
+           balance_worker_idle_sleep_us_ = balance_worker_idle_sleep_sec;
+           balance_worker_idle_sleep_us_ *= 1000*1000;
+           if (balance_worker_idle_sleep_us_ < MIN_BALANCE_WORKER_SLEEP_US)
+           {
+             balance_worker_idle_sleep_us_ = MIN_BALANCE_WORKER_SLEEP_US;
+           }
+           TBSYS_LOG(INFO, "balance_worker_idle_sleep_us=%ld", balance_worker_idle_sleep_us_);
+
+           int safe_copy_count_in_init = config.getInt(STR_SECTION_ROOT_SERVER, STR_SAFE_COPY_COUNT_IN_INIT, 2);
+           if (safe_copy_count_in_init > 0 && safe_copy_count_in_init <= OB_SAFE_COPY_COUNT)
+           {
+             safe_copy_count_in_init_ = safe_copy_count_in_init;
+           }
+           TBSYS_LOG(INFO, "safe_copy_count_in_init_=%d", safe_copy_count_in_init_);
+           int safe_copy_count_in_merge = config.getInt(STR_SECTION_ROOT_SERVER, STR_SAFE_COPY_COUNT_IN_MERGE, 2);
+           if (safe_copy_count_in_merge > 0 && safe_copy_count_in_merge <= OB_SAFE_COPY_COUNT)
+           {
+             safe_copy_count_in_merge_ = safe_copy_count_in_merge;
+           }
+           int tmp = config.getInt(STR_SECTION_ROOT_SERVER, STR_TABLET_REPLICAS_NUM, DEFAULT_TABLET_REPLICAS_NUM);
+           if (safe_copy_count_in_init_ > tmp)
+           {
+             TBSYS_LOG(ERROR, "tablet_replicas_num=%d safe_copy_count_in_init=%d", tmp, safe_copy_count_in_init_);
+             res = false;
+           }
+           else if (0 < tmp && OB_SAFE_COPY_COUNT >= tmp)
+           {
+             tablet_replicas_num_ = tmp;
+             TBSYS_LOG(INFO, "tablet_replicas_num=%d", tablet_replicas_num_);
+           }
+           else
+           {
+             TBSYS_LOG(WARN, "invalid tablet_replicas_num, num=%d", tmp);
+           }
+           create_table_in_init_ = config.getInt(STR_SECTION_ROOT_SERVER, STR_CREATE_TABLE_IN_INIT,0);
+         }
+         if (res)
+         {
+           const char* ip =  config.getString(STR_SECTION_ROOT_SERVER, STR_IP, NULL);
+           int port = config.getInt(STR_SECTION_ROOT_SERVER, STR_PORT, 0);
+           if (!my_addr_.set_ipv4_addr(ip, port))
+           {
+             TBSYS_LOG(ERROR, "invalid addr, addr=%s port=%d", ip, port);
+             res = false;
+           }
+           else
+           {
+             char addr_buf[OB_IP_STR_BUFF];
+             my_addr_.to_string(addr_buf, OB_IP_STR_BUFF);
+             TBSYS_LOG(INFO, "my addr=%s", addr_buf);
+           }
+         }
+         if (res)
+         {
+           res = (OB_SUCCESS == load_ups_list(config));
+         }
+         if (res)
+         {
+           res = (OB_SUCCESS == load_client_config(config));
+         }
+        TBSYS_LOG(INFO, "reload config, file=%s ret=%c", config_file_name, res?'Y':'N');
       }
       return res;
     }
@@ -577,663 +811,916 @@ namespace oceanbase
     void ObRootServer2::dump_root_table() const
     {
       tbsys::CRLockGuard guard(root_table_rwlock_);
+      TBSYS_LOG(INFO, "dump root table");
       if (root_table_for_query_ != NULL)
       {
         root_table_for_query_->dump();
       }
     }
-    void ObRootServer2::reload_config()
+
+    void ObRootServer2::dump_unusual_tablets() const
     {
-      reload_config(config_file_name_);
-    }
-
-    int ObRootServer2::update_server_freeze_mem(int64_t& frozen_mem_version)
-    {
-      int res = OB_SUCCESS;
-      if (update_server_status_.status_ != ObServerStatus::STATUS_SERVING)
+      tbsys::CRLockGuard guard(root_table_rwlock_);
+      TBSYS_LOG(INFO, "dump unusual tablets");
+      if (root_table_for_query_ != NULL)
       {
-        TBSYS_LOG(WARN, "update server status error now is %ld force it to STATUS_SERVING", update_server_status_.status_);
-        update_server_status_.status_ = ObServerStatus::STATUS_SERVING;
-      }
-      build_sync_flag_ = BUILD_SYNC_FLAG_FREEZE_MEM;
-      while (update_server_status_.status_ == ObServerStatus::STATUS_SERVING && !drop_this_build_)
-      {
-        if (!is_master())
-        {
-          usleep(SLAVE_SLEEP_TIME); // wait for update server response
-          continue;
-        }
-
-        TBSYS_LOG(INFO, "wait for update server change to STATUS_REPORTING ");
-        if (OB_SUCCESS == worker_->up_freeze_mem(update_server_status_.server_, frozen_mem_version))
-        {
-          echo_update_server_freeze_mem();
-        }
-        else 
-        {
-          sleep(PACKAGE_TIME_OUT);
-        }
-      }
-      if (is_master()) sleep(WAIT_SECONDS);
-      while (update_server_status_.status_ == ObServerStatus::STATUS_REPORTING && !drop_this_build_)
-      {
-        // when the update server has done his job, he will send message, and 
-        // status will be changed to STATUS_REPORTED
-        TBSYS_LOG(DEBUG,"wait for update server finish his job");
-        if (is_master()) worker_->up_freeze_mem(update_server_status_.server_, frozen_mem_version);
-        sleep(WAIT_SECONDS);
-      }
-      if (update_server_status_.status_ != ObServerStatus::STATUS_REPORTED)
-      {
-        TBSYS_LOG(WARN,"update_server_status %ld", update_server_status_.status_);
-        res = OB_ERROR;
-      }
-      return res;
-    }
-    int ObRootServer2::cs_start_merge(const int64_t frozen_mem_version, const int32_t build_flag)
-    {
-      int res = OB_SUCCESS;
-      bool have_server_not_prepaired = false;
-      do
-      {
-        if (drop_this_build_) break;
-        have_server_not_prepaired = false;
-        TBSYS_LOG(DEBUG,"check if all alive server have received start merge command");
-        {
-          //tbsys::CRLockGuard guard(server_manager_rwlock_); //do not use this lock
-          ObChunkServerManager::const_iterator it = server_manager_.begin();
-          bool send_request = false;
-          for (; it != server_manager_.end(); ++it)
-          {
-            send_request = false;
-            if(it->status_ == ObServerStatus::STATUS_SERVING || it->status_ == ObServerStatus::STATUS_WAITING_REPORT)
-            {
-              send_request = true;
-            }
-            if(send_request)
-            {
-              if (is_master())
-              {
-                // send packet only if I am master
-                ObServer server(it->server_);
-                server.set_port(it->port_cs_);
-                if (OB_SUCCESS == worker_->cs_start_merge(server, frozen_mem_version, build_flag))
-                {
-                  echo_start_merge_received(server);
-                  usleep(cs_merge_command_interval_mseconds_);
-                }
-              }
-              have_server_not_prepaired = true;
-            }
-          }
-        }// release lock
-        if (have_server_not_prepaired) sleep(PACKAGE_TIME_OUT);
-      }while(have_server_not_prepaired);
-
-      return res;
-    }
-    void ObRootServer2::execute_batch_migrate()
-    {
-      const ObBatchMigrateInfo* it = batch_migrate_helper_.begin();
-      int64_t monotonic_finish_time = tbsys::CTimeUtil::getMonotonicTime() + migrate_wait_seconds_ * 1000000L;
-      ObServer src_server;
-      ObServer dest_server;
-      ObServerStatus* src_status = NULL;
-      ObServerStatus* dest_status = NULL;
-      if (it < batch_migrate_helper_.end()) 
-      {
-        TBSYS_LOG(INFO, "execute_batch_migrate start");
-        for (; it != batch_migrate_helper_.end(); ++it)
-        {
-          src_status = server_manager_.get_server_status(it->get_src_server_index());
-          dest_status = server_manager_.get_server_status(it->get_dest_server_index());
-          if (src_status == NULL || dest_status == NULL)
-          {
-            TBSYS_LOG(ERROR, "you should not get this bugss!");
-          }
-          else
-          {
-            src_server = server_manager_.get_cs(it->get_src_server_index());
-            dest_server = server_manager_.get_cs(it->get_dest_server_index());
-
-            if (OB_SUCCESS == worker_->cs_migrate(*(it->get_range()), src_server, dest_server, it->get_keep_src()))
-            {
-              //set migrate_out_finish_time_ and migrate_in_finish_time_ again
-              src_status->migrate_out_finish_time_ = monotonic_finish_time;
-              dest_status->migrate_in_finish_time_ = monotonic_finish_time;
-
-              static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
-              it->get_range()->to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
-              char f_server[OB_IP_STR_BUFF];
-              char t_server[OB_IP_STR_BUFF];
-              src_server.to_string(f_server, OB_IP_STR_BUFF);
-              dest_server.to_string(t_server, OB_IP_STR_BUFF);
-              TBSYS_LOG(INFO, "migrate/copy tablet, tablet=%s src=%s dest=%s keep_src=%d", 
-                        row_key_dump_buff, f_server, t_server, it->get_keep_src());
-            }
-
-          }
-        } // end for
-
-        //if (batch_migrate_helper_.begin() != batch_migrate_helper_.end())
-        //{
-        //  //sleep only when batch_migrate_helper is not empty
-        //  sleep(migrate_wait_seconds_);
-        //}
-        //TBSYS_LOG(DEBUG, "execute_batch_migrate end");
-      }
-      batch_migrate_helper_.reset();
-    }
-    /*
-     * 当某tablet的备份数不足时候, 补足备份
-     */
-    //return value 
-    //const int ADD_OK = 0;
-    //const int SHOULD_DO_MIGRATE = 1;
-    //const int CAN_NOT_FIND_SUTABLE_SERVER = 2;
-    int ObRootServer2::add_copy(const ObRootTable2* root_table, ObRootTable2::iterator& it, 
-                                const int64_t monotonic_now,const int64_t last_version)
-    {
-      int return_code = ADD_ERROR;
-      if (root_table != NULL)
-      {
-        return_code = ADD_OK;
-        const common::ObTabletInfo* tablet_info = NULL;
-        tablet_info = root_table->get_tablet_info(it);
-        if (tablet_info == NULL)
-        {
-          TBSYS_LOG(ERROR, "you should not reach this bugs");
-          return_code = ADD_ERROR;
-        }
-        else 
-        {
-          ObCandidateServerBySharedManager2::effectiveServer effective_server;
-          int src_server_index = OB_INVALID_INDEX;
-          int dest_server_index = OB_INVALID_INDEX;
-          const ObRange* range = &(tablet_info->range_);
-          int64_t occupy_size = tablet_info->occupy_size_;
-          int added = 0;
-          ObServerStatus* server_status = NULL;
-          bool chosen_server_busy = false; //is the server we chosen in migrating? 
-          for (int32_t i = 0; i < OB_SAFE_COPY_COUNT; ++i)
-          {
-            if ((it->server_info_indexes_[i] != OB_INVALID_INDEX) && 
-                    (it->tablet_version_[i] >= last_version))
-            {
-              effective_server.server_indexes_[added] = it->server_info_indexes_[i];
-              server_status = server_manager_.get_server_status(it->server_info_indexes_[i]);
-              if (server_status != NULL)
-              {
-                if (server_status->migrate_out_finish_time_ < monotonic_now)
-                {
-                  src_server_index = it->server_info_indexes_[i];
-                }
-                else 
-                {
-                  chosen_server_busy = true;
-                }
-              }
-              added++;
-              if (added >= OB_SAFE_COPY_COUNT)
-              {
-                break;
-              }
-            }
-          }
-          if (src_server_index != OB_INVALID_INDEX)
-          {
-            {
-              tbsys::CRLockGuard guard(server_manager_rwlock_);
-              candidate_shared_helper_.init(effective_server, &server_manager_);
-            }
-            candidate_shared_helper_.scan_root_table(root_table_for_query_);
-            candidate_shared_helper_.sort();
-            // now candidate_shared_helper_ will contain all candidate server sorted by shared count
-          }
-
-          int32_t lowest_shared_count = -1;
-          int32_t lowest_disk_used_percent = -1;
-          server_status = NULL;
-          //chosen_server_busy = false;
-          ObCandidateServerBySharedManager2::sharedInfo* candidate_it = candidate_shared_helper_.begin();
-          bool consider_it = false;
-
-          for (; candidate_it != candidate_shared_helper_.end() && src_server_index != OB_INVALID_INDEX; 
-              ++candidate_it)
-          {
-            if (server_manager_.can_migrate_in(candidate_it->server_index_, occupy_size, &balance_prameter_))
-            {
-              consider_it = false;
-              if (lowest_shared_count == -1)
-              {
-                lowest_shared_count = candidate_it->shared_count_;
-                consider_it = true;
-              }
-              else if (lowest_shared_count > 0)
-              {
-                if (((candidate_it->shared_count_ - lowest_shared_count) * 100/lowest_shared_count )
-                    < balance_prameter_.shared_adjacent_)
-                {
-                  consider_it = true;
-                }
-              }
-              if (consider_it)
-              {
-                server_status = server_manager_.get_server_status(candidate_it->server_index_);
-                if (server_status != NULL && 
-                    server_status->disk_info_.get_percent() > 0)
-                {
-                  if (lowest_disk_used_percent == -1 || lowest_disk_used_percent > server_status->disk_info_.get_percent())
-                  {
-                    if (server_status->migrate_in_finish_time_ > monotonic_now)
-                    {
-                      chosen_server_busy = true;
-                    }
-                    else 
-                    {
-                      lowest_disk_used_percent = server_status->disk_info_.get_percent();
-                      dest_server_index = candidate_it->server_index_;
-                    }
-                  }
-                }
-              }
-            }
-          }
-          if (range == NULL || src_server_index == OB_INVALID_INDEX || dest_server_index == OB_INVALID_INDEX)
-          {
-            if (!chosen_server_busy)
-            {
-              //chosen_server_busy is false means we can not find suitable server
-              //chosen_server_busy is true means for now, we can not find suitable server
-              TBSYS_LOG(ERROR, "root server can not find suitable server for lost tablet");
-              if (range != NULL) 
-              {
-                static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
-                range->to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
-                TBSYS_LOG(INFO, "%s", row_key_dump_buff);
-                //range->hex_dump(TBSYS_LOG_LEVEL_INFO);
-              }
-            }
-            return_code = CAN_NOT_FIND_SUTABLE_SERVER;
-          }
-          else
-          {
-            ObBatchMigrateInfo bmi(range, src_server_index, dest_server_index, true);
-            tbsys::CRLockGuard guard(server_manager_rwlock_);
-            int ret = batch_migrate_helper_.add(bmi, monotonic_now, server_manager_);
-            if (ret == ObBatchMigrateInfoManager::ADD_REACH_MAX) 
-            {
-              return_code = SHOULD_DO_MIGRATE;
-            }
-            else if (ObBatchMigrateInfoManager::ADD_OK == ret)
-            {
-              it->migrate_monotonic_time_ = monotonic_now + migrate_wait_seconds_;
-            }
-          }
-        }
-      }
-      return return_code;
-    }
-
-// @return 0 do not copy, 1 copy immediately, -1 delayed copy
-inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
-{
-  OB_ASSERT(0 <= available_num);
-  OB_ASSERT(0 <= lost_num);
-  int ret = 0;
-  if (0 == available_num || 0 == lost_num)
-  {
-    ret = 0;
-  }
-  else if (1 == available_num)
-  {
-    ret = 1;
-  }
-  else if (1 < available_num && available_num < lost_num)
-  {
-    ret = 1;
-  }
-  else
-  {
-    ret = -1;
-  }
-  return ret;
-}
-
-    void ObRootServer2::add_lost_tablet()
-    {
-      TBSYS_LOG(DEBUG, "start add_lost_tablet");
-      batch_migrate_helper_.reset();
-      int64_t now = tbsys::CTimeUtil::getTime();
-      if (root_table_for_query_ != NULL) 
-      {
-        bool still_have = false;
-        ObRange last_range;
-        int lost_copy = 0;
-        int add_ret = 0;
-        do 
-        {
-          still_have = false;
-          {
-            int64_t monotonic_now = tbsys::CTimeUtil::getMonotonicTime();
-            int64_t last_version = 0;
-            ObRootTable2::iterator it;
-            tbsys::CRLockGuard guard(root_table_rwlock_);
-            for (it = root_table_for_query_->begin(); it < root_table_for_query_->sorted_end(); ++it)
-            {
-              int32_t valid_replicas_num = 0;
-              for (int32_t i = 0; i < OB_SAFE_COPY_COUNT; i++)
-              {
-                if (OB_INVALID_INDEX != it->server_info_indexes_[i])
-                {
-                  valid_replicas_num ++;
-                  if (it->tablet_version_[i] > last_version)
-                  {
-                    last_version = it->tablet_version_[i];
-                  }
-                }
-              }
-              lost_copy = 0;
-              if (valid_replicas_num < tablet_replicas_num_)
-              {
-                lost_copy = tablet_replicas_num_ - valid_replicas_num;
-              }
-              else if (valid_replicas_num > tablet_replicas_num_)
-              {
-                TBSYS_LOG(DEBUG, "too many replicas, available=%d defined=%d", valid_replicas_num, tablet_replicas_num_);
-              }
-              int did_need_copy = need_copy(valid_replicas_num, lost_copy);
-              if ((safe_copy_count_in_init_ > 1)
-                  && (1 == did_need_copy
-                      || (-1 == did_need_copy && now - it->last_dead_server_time_ > safe_lost_one_duration_)))
-              {
-                if ((it->migrate_monotonic_time_ < monotonic_now))
-                {
-                  add_ret = add_copy(root_table_for_query_, it, monotonic_now,last_version);
-                  if(add_ret == CAN_NOT_FIND_SUTABLE_SERVER)
-                  {
-                    //NULL;
-                  }
-                  else 
-                  {
-                    still_have = true;
-                    if(add_ret == SHOULD_DO_MIGRATE)
-                    {
-                      break;
-                    }
-                  }
-                }
-              } // end if
-            } // end for
-          }//release lock;
-          {
-            tbsys::CThreadGuard guard(&status_mutex_);
-            if (server_status_ == STATUS_INTERRUPT_BALANCING)
-            {
-              break;
-            }
-          }
-          if (still_have) execute_batch_migrate();
-        } while (false);
+        root_table_for_query_->dump_unusual_tablets(last_frozen_mem_version_, tablet_replicas_num_);
       }
     }
-    /*
-     * 需要从某server移出tablet以减轻其压力
-     */
-    //return value 
-    //const int ADD_OK = 0;
-    //const int SHOULD_DO_MIGRATE = 1;
-    //const int CAN_NOT_FIND_SUTABLE_SERVER = 2;
-    int ObRootServer2::move_out_tablet(ObServerStatus* migrate_out_server, const int64_t monotonic_now)
+    
+    bool ObRootServer2::reload_config(bool did_write_log)
     {
-      int return_code = ADD_OK;
-      candidate_disk_helper_.reset();
-      ObRootTable2::const_iterator root_table_index_it = root_table_for_query_->sorted_end();
-      int32_t src_server_index = migrate_out_server - server_manager_.begin();
-      int32_t dest_server_index = OB_INVALID_INDEX;
+      bool ret = reload_config(config_file_name_);
+      if (ret && did_write_log && is_master())
       {
-        tbsys::CRLockGuard guard(server_manager_rwlock_);
-        ObChunkServerManager::iterator it = server_manager_.begin();
-        for (; it != server_manager_.end(); ++it) 
+        ret = (OB_SUCCESS == log_worker_->set_ups_list(ups_list_));
+        if (ret)
         {
-          if (it != migrate_out_server)
-          {
-            candidate_disk_helper_.add_server(it);
-          }
+          ret = (OB_SUCCESS == log_worker_->set_client_config(client_config_));
         }
       }
-      if (candidate_disk_helper_.get_length() <= 0)
-      {
-        TBSYS_LOG(DEBUG, "disk is not enougth");
-        //return_code = CAN_NOT_FIND_SUTABLE_SERVER;
-      }
-      ObServerStatus* migrate_in_server = NULL;
-      for (int candidate_index = 0; 
-          candidate_index < candidate_disk_helper_.get_length() && migrate_in_server == NULL;
-          candidate_index++)
-      {
-        dest_server_index = OB_INVALID_INDEX;
-        if (ADD_OK == return_code)
-        {
-          migrate_in_server = candidate_disk_helper_.get_server(candidate_index);
-
-          if (migrate_in_server->disk_info_.get_percent() >= balance_prameter_.disk_trigger_level_ ||
-              migrate_in_server->migrate_in_finish_time_ > monotonic_now)
-          {
-            char server_str[OB_IP_STR_BUFF];
-            migrate_in_server->server_.to_string(server_str, OB_IP_STR_BUFF);
-            TBSYS_LOG(DEBUG, "disk is not enougth or server is busy, "
-                      "dest_cs=%s percent=%d trigger_level=%d migrate_finish=%ld now=%ld", 
-                      server_str, 
-                      migrate_in_server->disk_info_.get_percent(), 
-                      balance_prameter_.disk_trigger_level_, 
-                      migrate_in_server->migrate_in_finish_time_, monotonic_now);
-            migrate_in_server = NULL;
-            continue;
-          }
-        }
-        if (migrate_in_server != NULL)
-        {
-          //try this server
-          ObCandidateServerBySharedManager2::effectiveServer effective_server;
-          effective_server.server_indexes_[0] = migrate_in_server - server_manager_.begin();
-          dest_server_index = migrate_in_server - server_manager_.begin();
-          {
-            tbsys::CRLockGuard guard(server_manager_rwlock_);
-            candidate_shared_helper_.init(effective_server, &server_manager_);
-          }
-          {
-            candidate_shared_helper_.scan_root_table(root_table_for_query_);
-          }
-          candidate_shared_helper_.sort();
-
-          ObRootTable2::const_iterator it;
-          int32_t lowest_shared_count = -1;
-          int32_t shared_count_in_range = 0;
-          bool consider_this = false;
-          ObCandidateServerBySharedManager2::sharedInfo* shared_info = NULL;
-          root_table_index_it = root_table_for_query_->sorted_end();
-          for (it = root_table_for_query_->begin(); it < root_table_for_query_->sorted_end(); it++)
-          {
-            //we will find a suitable tablet
-            consider_this = false;
-            for (int32_t i = 0; i < OB_SAFE_COPY_COUNT; i++)
-            {
-              if (it->server_info_indexes_[i] == src_server_index)
-              {
-                consider_this = true;
-              }
-              if (it->migrate_monotonic_time_ >= monotonic_now)
-              {
-                consider_this = false;
-                break;
-              }
-              if (it->server_info_indexes_[i] == dest_server_index)
-              {
-                consider_this = false;
-                break;
-              }
-              //only the tablet in src_server and not in dest server can be consided;
-            }
-            if (consider_this)
-            {
-              shared_count_in_range = 0;
-              for (int32_t i = 0; i < OB_SAFE_COPY_COUNT; i++)
-              {
-                if (it->server_info_indexes_[i] != src_server_index && it->server_info_indexes_[i] != OB_INVALID_INDEX)
-                {
-                  shared_info = candidate_shared_helper_.find(it->server_info_indexes_[i]);
-                  if (shared_info != NULL)
-                  {
-                    shared_count_in_range += shared_info->shared_count_;
-                  }
-                }
-              }
-              if (lowest_shared_count == -1 || lowest_shared_count > shared_count_in_range)
-              {
-                lowest_shared_count = shared_count_in_range;
-                root_table_index_it = it;
-              }
-            }
-          } // end for
-        }
-        if (migrate_in_server == NULL || root_table_index_it == root_table_for_query_->sorted_end() 
-            || src_server_index == OB_INVALID_INDEX || dest_server_index == OB_INVALID_INDEX)
-        {
-          //not find suitable tablet;
-          migrate_in_server = NULL;
-        }
-        else
-        {
-          const common::ObTabletInfo* tablet_info = NULL;
-          tablet_info = ((const ObRootTable2*)root_table_for_query_)->get_tablet_info(root_table_index_it);
-          if (NULL == tablet_info)
-          {
-            TBSYS_LOG(ERROR, "why this is NULL bugs!!!");
-          }
-          else
-          {
-            if (server_manager_.can_migrate_in(dest_server_index, tablet_info->occupy_size_, &balance_prameter_))
-            {
-              ObBatchMigrateInfo bmi(&tablet_info->range_, src_server_index, dest_server_index, false);
-              int ret = batch_migrate_helper_.add(bmi, monotonic_now, server_manager_);
-              if (ret == ObBatchMigrateInfoManager::ADD_REACH_MAX) 
-              {
-                return_code = SHOULD_DO_MIGRATE;
-                break;
-              }
-              else if (ObBatchMigrateInfoManager::ADD_OK == ret)
-              {
-                root_table_index_it->migrate_monotonic_time_ = monotonic_now + migrate_wait_seconds_;
-              }
-            }
-            else
-            {
-              migrate_in_server = NULL;
-            }
-          }
-        }
-      }
-      if (NULL == migrate_in_server)
-      {
-        TBSYS_LOG(ERROR, "can not find suitable server");
-        return_code =CAN_NOT_FIND_SUTABLE_SERVER;
-      }
-      return return_code;
-    }
-    void ObRootServer2::do_balance()
-    {
-      add_lost_tablet();
-      ObServer server;
-      char msg[OB_IP_STR_BUFF];
-      ObServerStatus* migrate_server = NULL;
-      int move_ret = 0;
-      int64_t monotonic_now = 0;
-      do 
-      {
-        migrate_server = NULL;
-        {
-          monotonic_now = tbsys::CTimeUtil::getMonotonicTime();
-          //tbsys::CRLockGuard guard(server_manager_rwlock_); // do not need this lock
-          ObChunkServerManager::iterator it = server_manager_.begin();
-          for (; it != server_manager_.end(); ++it) 
-          {
-            if (it->status_ != ObServerStatus::STATUS_DEAD &&
-                it->disk_info_.get_percent() > balance_prameter_.disk_high_level_ &&
-                it->migrate_out_finish_time_ < monotonic_now //this means this server is not in migrating out
-               )
-            {
-              migrate_server = it;
-              server = it->server_;
-              server.set_port(it->port_cs_);
-              server.to_string(msg,OB_IP_STR_BUFF);
-              TBSYS_LOG(ERROR, "server %s reach disk high leve", msg);
-              move_ret = move_out_tablet(migrate_server, monotonic_now);
-              if (move_ret == SHOULD_DO_MIGRATE)
-              {
-                break;
-              }
-              else if (move_ret == CAN_NOT_FIND_SUTABLE_SERVER)
-              {
-                migrate_server = NULL;
-              }
-            }
-          }
-        }//release lock
-        {
-          tbsys::CThreadGuard guard(&status_mutex_);
-          if (server_status_ == STATUS_INTERRUPT_BALANCING)
-          {
-            break;
-          }
-        }
-        execute_batch_migrate();
-      } while ( false);
-      //deal with trigger level
-      do 
-      {
-        {
-          tbsys::CRLockGuard guard(root_table_rwlock_);
-          migrate_server = NULL;
-          {
-            monotonic_now = tbsys::CTimeUtil::getMonotonicTime();
-            //tbsys::CRLockGuard guard(server_manager_rwlock_);  //do not need this lock
-            ObChunkServerManager::iterator it = server_manager_.begin();
-            for (; it != server_manager_.end(); ++it) 
-            {
-              if (it->status_ != ObServerStatus::STATUS_DEAD &&
-                  it->disk_info_.get_percent() > balance_prameter_.disk_trigger_level_ &&
-                  it->migrate_out_finish_time_ < monotonic_now //this means this server is not in migrating out
-                 )
-              {
-                migrate_server = it;
-                server = it->server_;
-                server.set_port(it->port_cs_);
-                server.to_string(msg,OB_IP_STR_BUFF);
-                TBSYS_LOG(WARN, "server %s reach disk trigger leve", msg);
-                move_ret = move_out_tablet(migrate_server, monotonic_now);
-                if (move_ret == SHOULD_DO_MIGRATE)
-                {
-                  break;
-                }else if (move_ret == CAN_NOT_FIND_SUTABLE_SERVER)
-                {
-                  migrate_server = NULL;
-                }
-              }
-            }
-          }
-        }//release lock
-        {
-          tbsys::CThreadGuard guard(&status_mutex_);
-          if (server_status_ == STATUS_INTERRUPT_BALANCING)
-          {
-            break;
-          }
-        }
-        execute_batch_migrate();
-      } while (false);
+      return ret;
     }
 
+     // @return 0 do not copy, 1 copy immediately, -1 delayed copy
+     inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
+     {
+       OB_ASSERT(0 <= available_num);
+       OB_ASSERT(0 <= lost_num);
+       int ret = 0;
+       if (0 == available_num || 0 == lost_num)
+       {
+         ret = 0;
+       }
+       else if (1 == lost_num)
+       {
+         ret = -1;
+       }
+       else                          // lost_num >= 2
+       {
+         ret = 1;
+       }
+       return ret;
+     }
+
+     int32_t ObRootServer2::nb_get_table_count()
+     {
+       int32_t ret = 0;
+       tbsys::CRLockGuard guard(schema_manager_rwlock_);
+       if (NULL == schema_manager_)
+       {
+         TBSYS_LOG(ERROR, "schema_manager is NULL");
+       }
+       else
+       {
+         const ObTableSchema* it = NULL;
+         for (it = schema_manager_->table_begin(); schema_manager_->table_end() != it; ++it)
+         {
+           ret++;
+         }
+       }
+       return ret;
+     }
+     
+     uint64_t ObRootServer2::nb_get_next_table_id(int32_t table_count, int32_t seq/*=-1*/)
+     {
+       uint64_t ret = OB_INVALID_ID;
+       // for each table
+       tbsys::CRLockGuard guard(schema_manager_rwlock_);
+       if (NULL == schema_manager_)
+       {
+         TBSYS_LOG(ERROR, "schema_manager is NULL");
+       }
+       else if (0 >= table_count)
+       {
+         // no table
+       }
+       else
+       {
+         if (0 > seq)
+         {
+           seq = balance_next_table_seq_;
+           balance_next_table_seq_++;
+         }
+         int32_t idx = 0;
+         const ObTableSchema* it = NULL;
+         for (it = schema_manager_->table_begin(); schema_manager_->table_end() != it; ++it)
+         {
+           if (seq % table_count == idx)
+           {
+             ret = it->get_table_id();
+             break;
+           }
+           idx++;
+         }
+       }
+       return ret;
+     }
+
+     int ObRootServer2::nb_find_dest_cs(ObRootTable2::const_iterator meta, int64_t low_bound, int32_t cs_num, 
+                                        int32_t &dest_cs_idx, ObChunkServerManager::iterator &dest_it)
+     {
+       int ret = OB_ENTRY_NOT_EXIST;
+       dest_cs_idx = OB_INVALID_INDEX;
+       if (0 < cs_num)
+       {
+         ObChunkServerManager::iterator it = server_manager_.begin();
+         it += balance_select_dest_start_pos_ % cs_num;
+         if (it >= server_manager_.end())
+         {
+           it = server_manager_.begin();
+         }
+         ObChunkServerManager::iterator it_start_pos = it;
+         int32_t cs_idx = OB_INVALID_INDEX;
+         // scan from start_pos to end(), then from start() to start_pos
+         while(true)
+         {
+           if (it->status_ != ObServerStatus::STATUS_DEAD
+               && it->balance_info_.table_sstable_count_ < low_bound)
+           {
+             cs_idx = it - server_manager_.begin();
+             // this cs does't have this tablet
+             if (!meta->did_cs_have(cs_idx))
+             {
+               dest_it = it;
+               dest_cs_idx = cs_idx;
+               TBSYS_LOG(DEBUG, "find dest cs, start_pos=%ld cs_idx=%d", 
+                         it_start_pos-server_manager_.begin(), dest_cs_idx);
+               balance_select_dest_start_pos_ = dest_cs_idx + 1;
+               ret = OB_SUCCESS;
+               break;
+             }
+           }
+           ++it;
+           if (it == server_manager_.end())
+           {
+             it = server_manager_.begin();
+           }
+           if (it == it_start_pos)
+           {
+             break;
+           }
+         } // end while
+       }
+       return ret;
+     }
+
+     int ObRootServer2::nb_check_rereplication(ObRootTable2::const_iterator it, RereplicationAction &act)
+     {
+       int ret = OB_SUCCESS;
+       act = RA_NOP;
+       if (enable_rereplication_)
+       {
+         int64_t last_version = 0;
+         int32_t valid_replicas_num = 0;
+         int32_t lost_copy = 0;
+         for (int32_t i = 0; i < OB_SAFE_COPY_COUNT; i++)
+         {
+           if (OB_INVALID_INDEX != it->server_info_indexes_[i])
+           {
+             valid_replicas_num ++;
+             if (it->tablet_version_[i] > last_version)
+             {
+               last_version = it->tablet_version_[i];
+             }
+           }
+         }
+       
+         if (valid_replicas_num < tablet_replicas_num_)
+         {
+           lost_copy = tablet_replicas_num_ - valid_replicas_num;
+           int did_need_copy = need_copy(valid_replicas_num, lost_copy);
+           int64_t now = tbsys::CTimeUtil::getTime();
+           if (1 == did_need_copy)
+           {
+             act = RA_COPY;
+           }
+           else if (-1 == did_need_copy)
+           {
+             if (now - it->last_dead_server_time_ > safe_lost_one_duration_)
+             {
+               act = RA_COPY;
+             }
+             else
+             {
+               TBSYS_LOG(DEBUG, "copy delayed, now=%ld lost_replica_time=%ld duration=%ld",
+                         now, it->last_dead_server_time_, safe_lost_one_duration_);
+             }
+           }
+         }
+         else if (valid_replicas_num > tablet_replicas_num_)
+         {
+           act = RA_DELETE;
+         }
+       }
+       return ret;
+     }
+
+     int ObRootServer2::nb_select_copy_src(ObRootTable2::const_iterator it, 
+                                           int32_t &src_cs_idx, ObChunkServerManager::iterator &src_it)
+     {
+       int ret = OB_ENTRY_NOT_EXIST;
+       src_cs_idx = OB_INVALID_INDEX;
+       int32_t min_count = INT32_MAX;
+       // find cs with min migrate out count
+       for (int i = 0; i < OB_SAFE_COPY_COUNT; ++i)
+       {
+         if (OB_INVALID_INDEX != it->server_info_indexes_[i])
+         {
+           ObServerStatus *src_cs = server_manager_.get_server_status(it->server_info_indexes_[i]);
+           int32_t migrate_count = src_cs->balance_info_.migrate_to_.count();
+           if (migrate_count < min_count 
+               && migrate_count < balance_max_migrate_out_per_cs_)
+           {
+             min_count = migrate_count;
+             src_cs_idx = src_cs - server_manager_.begin();
+             src_it = src_cs;
+             ret = OB_SUCCESS;
+           }
+         }
+       }
+       return ret;
+     }
+
+     int ObRootServer2::nb_add_copy(ObRootTable2::const_iterator it, const ObTabletInfo* tablet, int64_t low_bound, int32_t cs_num)
+     {
+       int ret = OB_ERROR;
+       int32_t dest_cs_idx = OB_INVALID_INDEX;
+       ObServerStatus *dest_it = NULL;
+       if (OB_SUCCESS != nb_find_dest_cs(it, low_bound, cs_num, dest_cs_idx, dest_it)
+           || OB_INVALID_INDEX == dest_cs_idx)
+       {
+         if (OB_SUCCESS != nb_find_dest_cs(it, INT64_MAX, cs_num, dest_cs_idx, dest_it)
+             || OB_INVALID_INDEX == dest_cs_idx)
+         {
+           TBSYS_LOG(DEBUG, "cannot find dest cs");
+         }
+       }
+       if (OB_INVALID_INDEX != dest_cs_idx)
+       {
+         int32_t src_cs_idx = OB_INVALID_INDEX;
+         ObServerStatus *src_it = NULL;
+         if (OB_SUCCESS != nb_select_copy_src(it, src_cs_idx, src_it)
+             || OB_INVALID_INDEX == src_cs_idx)
+         {
+           TBSYS_LOG(DEBUG, "cannot find src cs");
+         }
+         else
+         {
+           int bm_ret = server_manager_.add_copy_info(*src_it, tablet->range_, dest_cs_idx);
+           if (OB_SUCCESS == bm_ret)
+           {
+             // no locking
+             dest_it->balance_info_.table_sstable_count_++;
+             balance_batch_migrate_count_++;
+             balance_batch_copy_count_++;
+             ret = OB_SUCCESS;
+           }
+         }
+       }
+       return ret;
+     }
+     
+     int ObRootServer2::nb_check_add_migrate(ObRootTable2::const_iterator it, const ObTabletInfo* tablet, int64_t avg_count, int32_t cs_num)
+     {
+       int ret = OB_SUCCESS;
+       int64_t delta_count = balance_tolerance_count_;
+       for (int i = 0; i < OB_SAFE_COPY_COUNT; ++i)
+       {
+         int32_t cs_idx = it->server_info_indexes_[i];
+         if (OB_INVALID_INDEX != cs_idx)
+         {
+           ObServerStatus *src_cs = server_manager_.get_server_status(cs_idx);
+           if (NULL != src_cs && ObServerStatus::STATUS_DEAD != src_cs->status_)
+           {
+             if (src_cs->balance_info_.table_sstable_count_ > avg_count + delta_count
+                 && src_cs->balance_info_.migrate_to_.count() < balance_max_migrate_out_per_cs_)
+             {
+               // move out this sstable
+               // find dest cs, no locking
+               int32_t dest_cs_idx = OB_INVALID_INDEX;
+               ObServerStatus *dest_it = NULL;
+               if (OB_SUCCESS != nb_find_dest_cs(it, avg_count - delta_count, cs_num, dest_cs_idx, dest_it)
+                   || OB_INVALID_INDEX == dest_cs_idx)
+               {
+                 TBSYS_LOG(DEBUG, "cannot find dest cs");
+               }
+               else
+               {
+                 int bm_ret = server_manager_.add_migrate_info(*src_cs, tablet->range_, dest_cs_idx);
+                 if (OB_SUCCESS == bm_ret)
+                 {
+                   // no locking
+                   src_cs->balance_info_.table_sstable_count_--;
+                   dest_it->balance_info_.table_sstable_count_++;
+                   balance_batch_migrate_count_++;
+                 }
+               }
+               break;
+             }
+           }
+         }
+       } // end for
+       return ret;
+     }
+     
+     int ObRootServer2::nb_balance_by_table(const uint64_t table_id, bool &scan_next_table)
+     {
+       int ret = OB_SUCCESS;
+       int64_t avg_size = 0;
+       int64_t avg_count = 0;
+       int64_t delta_count = balance_tolerance_count_;
+       int32_t cs_num = 0;
+       scan_next_table = true;
+       
+       if (OB_SUCCESS != (ret = nb_calculate_sstable_count(table_id, avg_size, avg_count, cs_num)))
+       {
+         TBSYS_LOG(WARN, "calculate table size error, err=%d", ret);
+       }
+       else if (0 < cs_num)
+       {
+         bool is_curr_table_balanced = nb_is_curr_table_balanced(avg_count);
+         if (!is_curr_table_balanced)
+         {
+           TBSYS_LOG(DEBUG, "balance table, table_id=%lu avg_count=%ld", table_id, avg_count);
+           nb_print_balance_info();
+         }
+         
+         ObRootTable2::const_iterator it;
+         const ObTabletInfo* tablet = NULL;
+         bool table_found = false;
+         RereplicationAction ract;
+         // scan the root table
+         tbsys::CRLockGuard guard(root_table_rwlock_);
+         for (it = root_table_for_query_->begin(); it != root_table_for_query_->sorted_end(); ++it)
+         {
+           tablet = root_table_for_query_->get_tablet_info(it);
+           if (NULL != tablet)
+           {
+             if (tablet->range_.table_id_ == table_id)
+             {
+               if (!table_found)
+               {
+                 table_found = true;
+               }
+               // check re-replication first
+               int add_ret = OB_ERROR;
+               if (OB_SUCCESS == nb_check_rereplication(it, ract))
+               {
+                 if (RA_COPY == ract)
+                 {
+                   add_ret = nb_add_copy(it, tablet, avg_count - delta_count, cs_num);
+                 }
+                 else if (RA_DELETE == ract)
+                 {
+                   // @todo
+                 }
+               }
+               // then do balnace if needed
+               if (OB_SUCCESS != add_ret
+                   && !is_curr_table_balanced
+                   && enable_balance_)
+               {
+                 nb_check_add_migrate(it, tablet, avg_count, cs_num);
+               }
+               // terminate condition
+               if (server_manager_.is_migrate_infos_full())
+               {
+                 scan_next_table = false;
+                 break;
+               }
+             }
+             else
+             {
+               if (table_found)
+               {
+                 // another table
+                 break;
+               }
+             }
+           } // end if tablet not NULL
+         } // end for
+       }
+       return ret;
+     }
+
+     bool ObRootServer2::nb_is_curr_table_balanced(int64_t avg_sstable_count, const ObServer& except_cs) const
+     {
+       bool ret = true;
+       int64_t delta_count = balance_tolerance_count_;
+       int32_t cs_out = 0;
+       int32_t cs_in = 0;
+       ObChunkServerManager::const_iterator it;
+       for (it = server_manager_.begin(); it != server_manager_.end(); ++it) 
+       {
+         if (it->status_ != ObServerStatus::STATUS_DEAD)
+         {
+           if (except_cs == it->server_)
+           {
+             // do not consider except_cs
+             continue;
+           }
+           if ((avg_sstable_count + delta_count) < it->balance_info_.table_sstable_count_)
+           {
+             cs_out++;
+           }
+           else if ((avg_sstable_count - delta_count) > it->balance_info_.table_sstable_count_)
+           {
+             cs_in++;
+           }
+           if (0 < cs_out && 0 < cs_in)
+           {
+             ret = false;
+             break;
+           }
+         }
+       } // end for
+       return ret;
+     }
+     
+     bool ObRootServer2::nb_is_curr_table_balanced(int64_t avg_sstable_count) const
+     {
+       ObServer not_exist_cs;
+       return nb_is_curr_table_balanced(avg_sstable_count, not_exist_cs);
+     }
+     
+     int ObRootServer2::nb_calculate_sstable_count(const uint64_t table_id, int64_t &avg_size, int64_t &avg_count, int32_t &cs_count)
+     {
+       int ret = OB_SUCCESS;
+       avg_size = 0;
+       avg_count = 0;
+       cs_count = 0;
+       int64_t total_size = 0;
+       int64_t total_count = 0; // total sstable count
+       {                        
+         // prepare 
+         tbsys::CWLockGuard guard(server_manager_rwlock_);
+         server_manager_.reset_balance_info_for_table(cs_count);
+       } // end lock
+       {
+         // calculate sum
+         ObRootTable2::const_iterator it;
+         const ObTabletInfo* tablet = NULL;
+         tbsys::CRLockGuard guard(root_table_rwlock_);
+         bool table_found = false;
+         for (it = root_table_for_query_->begin(); it != root_table_for_query_->sorted_end(); ++it)
+         {
+           tablet = root_table_for_query_->get_tablet_info(it);
+           if (NULL != tablet)
+           {
+             if (tablet->range_.table_id_ == table_id)
+             {
+               if (!table_found)
+               {
+                 table_found = true;
+               }
+               for (int i = 0; i < OB_SAFE_COPY_COUNT; ++i)
+               {
+                 if (OB_INVALID_INDEX != it->server_info_indexes_[i])
+                 {
+                   ObServerStatus *cs = server_manager_.get_server_status(it->server_info_indexes_[i]);
+                   if (NULL != cs && ObServerStatus::STATUS_DEAD != cs->status_)
+                   {
+                     cs->balance_info_.table_sstable_total_size_ += tablet->occupy_size_;
+                     total_size += tablet->occupy_size_;
+                     cs->balance_info_.table_sstable_count_++;
+                     total_count++;
+                   }
+                 }
+               } // end for
+             }
+             else
+             {
+               if (table_found)
+               {
+                 break;
+               }
+             }
+           }
+         } // end for
+       }   // end lock
+       if (0 != cs_count)
+       {
+         avg_size = total_size / cs_count;
+         avg_count = total_count / cs_count;
+         int64_t sstable_avg_size = -1;
+         if (0 != total_count)
+         {
+           sstable_avg_size = total_size/total_count;
+         }
+         TBSYS_LOG(DEBUG, "sstable distribution, table_id=%lu total_size=%ld total_count=%ld "
+                   "cs_num=%d avg_size=%ld avg_count=%ld sstable_avg_size=%ld",
+                   table_id, total_size, total_count, 
+                   cs_count, avg_size, avg_count, sstable_avg_size);
+       }
+       return ret;
+     }
+     
+     void ObRootServer2::nb_print_balance_info() const
+     {
+       char addr_buf[OB_IP_STR_BUFF];
+       const ObServerStatus *it = server_manager_.begin();
+       for (; it != server_manager_.end(); ++it)
+       {
+         if (NULL != it && ObServerStatus::STATUS_DEAD != it->status_)
+         {
+           it->server_.to_string(addr_buf, OB_IP_STR_BUFF);
+           TBSYS_LOG(DEBUG, "cs=%s sstables_count=%ld sstables_size=%ld migrate=%d", 
+                     addr_buf, it->balance_info_.table_sstable_count_,
+                     it->balance_info_.table_sstable_total_size_,
+                     it->balance_info_.migrate_to_.count());
+         }
+       }
+     }
+     
+     void ObRootServer2::nb_print_balance_info(char *buf, const int64_t buf_len, int64_t& pos) const
+     {
+       char addr_buf[OB_IP_STR_BUFF];
+       const ObServerStatus *it = server_manager_.begin();
+       for (; it != server_manager_.end(); ++it)
+       {
+         if (NULL != it && ObServerStatus::STATUS_DEAD != it->status_)
+         {
+           it->server_.to_string(addr_buf, OB_IP_STR_BUFF);
+           databuff_printf(buf, buf_len, pos, "%s %ld %ld\n", 
+                           addr_buf, it->balance_info_.table_sstable_count_,
+                           it->balance_info_.table_sstable_total_size_);
+         }
+       }
+     }
+     
+     int ObRootServer2::send_msg_migrate(const ObServer &src, const ObServer &dest, const ObRange& range, bool keep_src)
+     {
+       int ret = OB_SUCCESS;
+       ret = worker_->get_rpc_stub().migrate_tablet(src, dest, range, keep_src, worker_->get_rpc_timeout());
+       if (OB_SUCCESS == ret)
+       {
+         static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
+         range.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
+         char f_server[OB_IP_STR_BUFF];
+         char t_server[OB_IP_STR_BUFF];
+         src.to_string(f_server, OB_IP_STR_BUFF);
+         dest.to_string(t_server, OB_IP_STR_BUFF);
+         TBSYS_LOG(INFO, "migrate tablet, tablet=%s src=%s dest=%s keep_src=%c", 
+                   row_key_dump_buff, f_server, t_server, keep_src?'Y':'N');
+       }
+       else
+       {
+         TBSYS_LOG(WARN, "failed to send migrate msg, err=%d", ret);
+       }
+       return ret;
+     }
+     
+     int ObRootServer2::nb_start_batch_migrate()
+     {
+       int ret = OB_SUCCESS;
+       int32_t sent_count = 0;
+       int32_t batch_migrate_per_cs = balance_max_concurrent_migrate_num_;
+       ObChunkServerManager::iterator it;
+       for (it = server_manager_.begin(); it != server_manager_.end(); ++it) 
+       {
+         if (it->status_ != ObServerStatus::STATUS_DEAD
+             && 0 < it->balance_info_.migrate_to_.count()
+             && it->balance_info_.curr_migrate_out_num_ < batch_migrate_per_cs)
+         {
+           // start the first K migrate
+           ObMigrateInfo *minfo = it->balance_info_.migrate_to_.head();
+           for (; NULL != minfo; minfo = minfo->next_)
+           {
+             if (OB_INVALID_INDEX != minfo->cs_idx_
+                 && ObMigrateInfo::STAT_INIT == minfo->stat_)
+             {
+               ObServerStatus* dest_cs = server_manager_.get_server_status(minfo->cs_idx_);
+               if (NULL != dest_cs 
+                   && ObServerStatus::STATUS_DEAD != dest_cs->status_
+                   && batch_migrate_per_cs > dest_cs->balance_info_.curr_migrate_in_num_)
+               {
+                 if (OB_SUCCESS == send_msg_migrate(it->server_, dest_cs->server_, minfo->range_, 1 == minfo->keep_src_))
+                 {
+                   minfo->stat_ = ObMigrateInfo::STAT_SENT;
+                   it->balance_info_.curr_migrate_out_num_++;
+                   dest_cs->balance_info_.curr_migrate_in_num_++;
+                   sent_count++;
+                   if (it->balance_info_.curr_migrate_out_num_ >= batch_migrate_per_cs)
+                   {
+                     break;
+                   }
+                 }
+               }
+             }
+           } // end while each migrate candidates
+         }   
+       } // end for
+       TBSYS_LOG(INFO, "batch migrate sent_num=%d done=%d total=%d", 
+                 sent_count, balance_batch_migrate_done_num_, balance_batch_migrate_count_);
+       if (0 >= sent_count)
+       {
+         nb_print_migrate_infos();
+       }
+       return ret;
+     }
+     
+     void ObRootServer2::nb_print_migrate_infos() const
+     {
+       TBSYS_LOG(INFO, "print migrate infos:");
+       char addr_buf1[OB_IP_STR_BUFF];
+       char addr_buf2[OB_IP_STR_BUFF];
+       static char range_buf[OB_MAX_ROW_KEY_LENGTH * 2];
+       int32_t idx = 0;
+       int32_t total_in = 0;
+       int32_t total_out = 0;
+       ObChunkServerManager::const_iterator it;
+       for (it = server_manager_.begin(); it != server_manager_.end(); ++it) 
+       {
+         if (it->status_ != ObServerStatus::STATUS_DEAD)
+         {
+           total_in += it->balance_info_.curr_migrate_in_num_;
+           total_out += it->balance_info_.curr_migrate_out_num_;
+           it->server_.to_string(addr_buf1, OB_IP_STR_BUFF);
+           TBSYS_LOG(INFO, "balance info, cs=%s in=%d out=%d",
+                     addr_buf1, it->balance_info_.curr_migrate_in_num_,
+                     it->balance_info_.curr_migrate_out_num_);
+
+           if(0 < it->balance_info_.migrate_to_.count())
+           {
+             const ObMigrateInfo *minfo = it->balance_info_.migrate_to_.head();
+             for (; NULL != minfo; minfo = minfo->next_)
+             {
+               if (OB_INVALID_INDEX != minfo->cs_idx_
+                   && ObMigrateInfo::STAT_DONE != minfo->stat_)
+               {
+                 const ObServerStatus* dest_cs = server_manager_.get_server_status(minfo->cs_idx_);
+                 if (NULL != dest_cs 
+                     && ObServerStatus::STATUS_DEAD != dest_cs->status_)
+                 {
+                   dest_cs->server_.to_string(addr_buf2, OB_IP_STR_BUFF);
+                   minfo->range_.to_string(range_buf, OB_MAX_ROW_KEY_LENGTH*2);
+                   TBSYS_LOG(INFO, "migrate info, idx=%d src_cs=%s dest_cs=%s range=%s stat=%s src_out=%d dest_in=%d keep_src=%c",
+                             idx, addr_buf1, addr_buf2, range_buf, minfo->get_stat_str(),
+                             it->balance_info_.curr_migrate_out_num_,
+                             dest_cs->balance_info_.curr_migrate_in_num_, 
+                             minfo->keep_src_?'Y':'N');
+                   idx++;
+                 }
+               }
+             } // end while each migrate candidates
+           }
+         }   
+       } // end for
+       if (total_in != total_out)
+       {
+         TBSYS_LOG(ERROR, "BUG total_in=%d total_out=%d", total_in, total_out);
+       }
+     }
+     
+     void ObRootServer2::dump_migrate_info() const
+     {
+       TBSYS_LOG(INFO, "balance batch migrate infos, start_us=%ld timeout_us=%ld done=%d total=%d",
+                 balance_start_time_us_, balance_timeout_us_, 
+                 balance_batch_migrate_done_num_, balance_batch_migrate_count_);
+       nb_print_migrate_infos();
+     }
+     
+     int ObRootServer2::nb_check_migrate_timeout()
+     {
+       int ret = OB_SUCCESS;
+       int64_t mnow = tbsys::CTimeUtil::getMonotonicTime();
+       if (nb_is_in_batch_migrating()
+           && balance_timeout_us_ + balance_timeout_us_delta_ + balance_start_time_us_ < mnow)
+       {
+         TBSYS_LOG(WARN, "balance batch migrate timeout, start_us=%ld prev_timeout_us=%ld done=%d total=%d",
+                   balance_start_time_us_, balance_timeout_us_, 
+                   balance_batch_migrate_done_num_, balance_batch_migrate_count_);
+         int64_t elapsed_us = 0;
+         if (balance_start_time_us_ < balance_last_migrate_succ_time_)
+         {
+           elapsed_us = balance_last_migrate_succ_time_ - balance_start_time_us_;
+         }
+         else
+         {
+           elapsed_us = mnow - balance_start_time_us_;
+         }
+         // better guess of timeout
+         if (0 >= balance_batch_migrate_done_num_)
+         {
+           balance_batch_migrate_done_num_ = 1;
+         }         
+         balance_timeout_us_ = balance_batch_migrate_count_ * elapsed_us / balance_batch_migrate_done_num_;
+         if (0 < balance_max_timeout_us_
+             && balance_timeout_us_ > balance_max_timeout_us_)
+         {
+           balance_timeout_us_ = balance_max_timeout_us_;
+         }
+         // clear
+         balance_start_time_us_ = 0;
+         balance_batch_migrate_count_ = 0;
+         balance_batch_copy_count_ = 0;
+         balance_batch_migrate_done_num_ = 0;
+         server_manager_.reset_balance_info(balance_max_migrate_out_per_cs_);
+       }
+       return ret;
+     }
+
+     bool ObRootServer2::nb_is_in_batch_migrating()
+     {
+       return 0 != balance_start_time_us_;
+     }
+     
+     void ObRootServer2::nb_batch_migrate_done()
+     {
+       if (nb_is_in_batch_migrating())
+       {
+         int64_t mnow = tbsys::CTimeUtil::getMonotonicTime();
+         TBSYS_LOG(INFO, "balance batch migrate done, elapsed_us=%ld prev_timeout_us=%ld done=%d",
+                   mnow - balance_start_time_us_, balance_timeout_us_, balance_batch_migrate_count_);
+
+         server_manager_.reset_balance_info(balance_max_migrate_out_per_cs_);
+         balance_timeout_us_ = mnow - balance_start_time_us_;
+         balance_start_time_us_ = 0;
+         balance_batch_migrate_count_ = 0;
+         balance_batch_copy_count_ = 0;
+         balance_batch_migrate_done_num_ = 0;
+       }
+     }
+     
+     int ObRootServer2::nb_trigger_next_migrate(const ObRange &range, int32_t src_cs_idx, int32_t dest_cs_idx, bool keep_src)
+     {
+       int ret = OB_SUCCESS;
+       tbsys::CWLockGuard guard(server_manager_rwlock_);
+       ObServerStatus *src_cs = server_manager_.get_server_status(src_cs_idx);
+       ObServerStatus *dest_cs = server_manager_.get_server_status(dest_cs_idx);
+       if (NULL == src_cs || NULL == dest_cs)
+       {
+         TBSYS_LOG(WARN, "invalid cs, src_cs_idx=%d dest_cs_id=%d", src_cs_idx, dest_cs_idx);
+         ret = OB_INVALID_ARGUMENT;
+       }
+       else if (ObServerStatus::STATUS_DEAD == src_cs->status_)
+       {
+         TBSYS_LOG(WARN, "src cs is offline, cs_idx=%d", src_cs_idx);
+         ret = OB_ENTRY_NOT_EXIST;
+       }
+       else if (!nb_is_in_batch_migrating()
+                || OB_SUCCESS != (ret = src_cs->balance_info_.migrate_to_.set_migrate_done(range, dest_cs_idx)))
+       {
+         TBSYS_LOG(WARN, "not a recorded migrate, src_cs=%d dest_cs=%d", src_cs_idx, dest_cs_idx);
+       }
+       else
+       {
+         src_cs->balance_info_.curr_migrate_out_num_--;
+         if (ObServerStatus::STATUS_DEAD != dest_cs->status_)
+         {
+           dest_cs->balance_info_.curr_migrate_in_num_--;
+         }
+         balance_batch_migrate_done_num_++;
+         balance_last_migrate_succ_time_ = tbsys::CTimeUtil::getMonotonicTime();
+         if (keep_src)
+         {
+           worker_->get_stat_manager().inc(ObRootStatManager::ROOT_TABLE_ID, ObRootStatManager::INDEX_COPY_COUNT);
+         }
+         else
+         {
+           worker_->get_stat_manager().inc(ObRootStatManager::ROOT_TABLE_ID, ObRootStatManager::INDEX_MIGRATE_COUNT);
+         }
+         if (balance_batch_migrate_done_num_ >= balance_batch_migrate_count_)
+         {
+           nb_batch_migrate_done();
+         }
+         else
+         {
+           // next migrate
+           ret = nb_start_batch_migrate();
+         }
+       }
+       return ret;
+     }
+
+     // 负载均衡入口函数
+     void ObRootServer2::do_new_balance()
+     {
+       int ret = OB_SUCCESS;
+       balance_batch_migrate_count_ = 0;
+       balance_batch_copy_count_ = 0;
+       balance_batch_migrate_done_num_ = 0;
+       balance_last_migrate_succ_time_ = 0;
+       server_manager_.reset_balance_info(balance_max_migrate_out_per_cs_);
+       TBSYS_LOG(DEBUG, "new balance begin");
+       int32_t table_count = nb_get_table_count();
+       bool scan_next_table = true;
+       for (int32_t i = 0; i < table_count && scan_next_table; ++i) // for each table
+       {
+         uint64_t table_id = OB_INVALID_ID;
+         if (OB_INVALID_ID != (table_id = nb_get_next_table_id(table_count)))
+         {
+           TBSYS_LOG(DEBUG, "balance next table, table_id=%lu table_count=%d", table_id, table_count);
+           ret = nb_balance_by_table(table_id, scan_next_table);
+         }
+       }
+
+       if (0 < balance_batch_migrate_count_)
+       {
+         TBSYS_LOG(INFO, "batch migrate begin, count=%d(copy=%d) timeout=%ld", 
+                   balance_batch_migrate_count_, balance_batch_copy_count_, balance_timeout_us_);
+         tbsys::CWLockGuard guard(server_manager_rwlock_);
+         balance_start_time_us_ = tbsys::CTimeUtil::getMonotonicTime();
+         ret = nb_start_batch_migrate();
+         balance_worker_sleep_us_ = MIN_BALANCE_WORKER_SLEEP_US;
+       }
+       else
+       {
+         // idle
+         balance_worker_sleep_us_ = balance_worker_idle_sleep_us_;
+         TBSYS_LOG(INFO, "balance worker idle, sleep_us=%ld", balance_worker_sleep_us_);
+       }
+     }
+
+     bool ObRootServer2::nb_is_all_tables_balanced(const common::ObServer &except_cs)
+     {
+       bool ret = true;
+       int32_t table_count = nb_get_table_count();
+       for (int32_t i = 0; i < table_count; ++i) // for each table
+       {
+         uint64_t table_id = OB_INVALID_ID;
+         if (OB_INVALID_ID != (table_id = nb_get_next_table_id(table_count, i)))
+         {
+           int64_t avg_size = 0;
+           int64_t avg_count = 0;
+           int32_t cs_num = 0;
+           if(OB_SUCCESS == nb_calculate_sstable_count(table_id, avg_size, avg_count, cs_num))
+           {
+             nb_print_balance_info();
+             ret = nb_is_curr_table_balanced(avg_count, except_cs);
+             if (!ret)
+             {
+               TBSYS_LOG(DEBUG, "table not balanced, id=%lu", table_id);
+               break;
+             }
+           }
+           else
+           {
+             ret = false;
+             break;
+           }
+         }
+       }
+       return ret;
+     }
+
+     bool ObRootServer2::nb_is_all_tables_balanced()
+     {
+       ObServer not_exist_cs;
+       return nb_is_all_tables_balanced(not_exist_cs);
+     }
+     
+     void ObRootServer2::nb_print_balance_infos(char* buf, const int64_t buf_len, int64_t &pos)
+     {
+       int32_t table_count = nb_get_table_count();
+       for (int32_t i = 0; i < table_count; ++i) // for each table
+       {
+         uint64_t table_id = OB_INVALID_ID;
+         if (OB_INVALID_ID != (table_id = nb_get_next_table_id(table_count, i)))
+         {
+           int64_t avg_size = 0;
+           int64_t avg_count = 0;
+           int32_t cs_num = 0;
+           if(OB_SUCCESS == nb_calculate_sstable_count(table_id, avg_size, avg_count, cs_num))
+           {
+             databuff_printf(buf, buf_len, pos, "table_id=%lu avg_count=%ld avg_size=%ld cs_num=%d\n", 
+                             table_id, avg_count, avg_size, cs_num);
+             databuff_printf(buf, buf_len, pos, "cs sstables_count sstables_size\n");
+             nb_print_balance_info(buf, buf_len, pos);
+             databuff_printf(buf, buf_len, pos, "--------\n");
+           }
+         }
+       }
+     }
+
+     bool ObRootServer2::nb_is_all_tablets_replicated(int32_t expected_replicas_num)
+     {
+       bool ret = true;
+       ObRootTable2::const_iterator it;
+       int32_t replicas_num = 0;
+       tbsys::CRLockGuard guard(root_table_rwlock_);
+       for (it = root_table_for_query_->begin(); it != root_table_for_query_->sorted_end(); ++it)
+       {
+         replicas_num = 0;
+         for (int i = 0; i < OB_SAFE_COPY_COUNT; ++i)
+         {
+           if (OB_INVALID_INDEX != it->server_info_indexes_[i])
+           {
+             replicas_num++;
+           }
+         }
+         if (replicas_num < expected_replicas_num)
+         {
+           TBSYS_LOG(DEBUG, "tablet not replicated, num=%d expected=%d", 
+                     replicas_num, expected_replicas_num);
+           ret = false;
+           break;
+         }
+       }
+       return ret;
+     }
+     
     /*
      * 从本地读取新schema, 判断兼容性
      */
@@ -1280,10 +1767,9 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
       return res;
     }
 
-    int ObRootServer2::init_root_table_by_report()
+    int ObRootServer2::create_root_table_for_build()
     {
-      TBSYS_LOG(INFO, "init_root_table_by_report begin");
-      int  res = OB_SUCCESS;
+      int ret = OB_SUCCESS;
       if (tablet_manager_for_build_ != NULL)
       {
         delete tablet_manager_for_build_;
@@ -1299,10 +1785,24 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
       if (tablet_manager_for_build_ == NULL) 
       {
         TBSYS_LOG(ERROR, "new ObTabletInfoManager error");
-        res = OB_ERROR;
+        ret = OB_ALLOCATE_MEMORY_FAILED;
       }
       root_table_for_build_ = new(std::nothrow)ObRootTable2(tablet_manager_for_build_);
+      if (NULL == root_table_for_build_)
+      {
+        TBSYS_LOG(ERROR, "new root table for build error");
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      }
       TBSYS_LOG(INFO, "new root_table_for_build=%p", root_table_for_build_);
+      return ret;
+    }
+    
+    int ObRootServer2::init_root_table_by_report()
+    {
+      TBSYS_LOG(INFO, "[NOTICE] init_root_table_by_report begin");
+      int  res = OB_SUCCESS;
+
+      create_root_table_for_build();
       if (root_table_for_build_ == NULL) 
       {
         TBSYS_LOG(ERROR, "new ObRootTable2 error");
@@ -1320,10 +1820,11 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
         sleep(1);
       }
       bool finish_init = false;
+      int round = 0;
       while(OB_SUCCESS == res && !finish_init && !receive_stop_)
       {
-        TBSYS_LOG(INFO, "clock click ");
-        sleep(wait_init_time_/ (1000L * 1000L));
+        TBSYS_LOG(INFO, "clock click, round=%d", ++round);
+
         ObTabletInfoManager* tablet_manager_tmp_ = NULL;
         ObRootTable2* root_table_tmp_ = NULL;
         if (OB_SUCCESS == res)
@@ -1344,6 +1845,8 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
         if (OB_SUCCESS == res)
         {
           tbsys::CThreadGuard guard_build(&root_table_build_mutex_);
+          TBSYS_LOG(INFO, "table_for_build is empty?%c", root_table_for_build_->is_empty()?'Y':'N');
+
           root_table_for_build_->sort();
           bool check_ok = false;
           check_ok = (OB_SUCCESS == root_table_for_build_->shrink_to(root_table_tmp_));
@@ -1360,7 +1863,7 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
             check_ok = root_table_tmp_->check_lost_range();
             if (!check_ok)
             {
-              TBSYS_LOG(ERROR, "check root table failed we will wait for another %ld seconds", wait_init_time_/(1000L * 1000L));
+              TBSYS_LOG(WARN, "check root table failed we will wait for another %ld seconds", wait_init_time_/(1000L * 1000L));
             }
           }
           if (check_ok)
@@ -1368,7 +1871,7 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
             check_ok = root_table_tmp_->check_tablet_copy_count(safe_copy_count_in_init_);
             if (!check_ok)
             {
-              TBSYS_LOG(ERROR, "check root table copy_count fail we will wait for another %ld seconds", wait_init_time_/(1000L * 1000L));
+              TBSYS_LOG(WARN, "check root table copy_count fail we will wait for another %ld seconds", wait_init_time_/(1000L * 1000L));
             }
           }
           if (check_ok) 
@@ -1392,6 +1895,7 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
                 ++server_count;
               }
             }
+            TBSYS_LOG(INFO, "all_cs_reported=%c cs_num=%d", all_server_is_reported ? 'Y' : 'N', server_count);
 
             if (server_count > 0 && all_server_is_reported &&
                 root_table_tmp_->is_empty() && (create_table_in_init_ != 0) && is_master() )
@@ -1408,7 +1912,7 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
               {
                 if(!root_table_tmp_->table_is_exist(it->get_table_id()))
                 {
-                  TBSYS_LOG(ERROR, "table_id = %lu has not been created are you sure about this?", it->get_table_id() );
+                  TBSYS_LOG(WARN, "table_id = %lu has not been created are you sure about this?", it->get_table_id() );
                   check_ok = false;
                   break;
                 }
@@ -1442,6 +1946,7 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
           delete root_table_tmp_;
           root_table_tmp_ = NULL;
         }
+        sleep(wait_init_time_/ (1000L * 1000L));
       }//end while
       if (root_table_for_build_ != NULL) 
       {
@@ -1492,7 +1997,7 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
           TBSYS_LOG(INFO, "do check point after init root table done");
         }
       }
-      TBSYS_LOG(INFO, "init_root_table_by_report finished, res=%d", res);
+      TBSYS_LOG(INFO, "[NOTICE] init_root_table_by_report finished, res=%d", res);
       return res;
     }
 
@@ -1608,78 +2113,82 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
       {
         static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
         range.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
-        TBSYS_LOG(INFO, "%s", row_key_dump_buff);
-        //range.hex_dump(TBSYS_LOG_LEVEL_INFO);
         char f_server[OB_IP_STR_BUFF];
         char t_server[OB_IP_STR_BUFF];
         src_server.to_string(f_server, OB_IP_STR_BUFF);
         dest_server.to_string(t_server, OB_IP_STR_BUFF);
-        TBSYS_LOG(INFO, "migrate_over received from server %s to server %s keep src =%d", f_server, t_server, keep_src);
-      }
-      int src_server_index = get_server_index(src_server);
-      int dest_server_index = get_server_index(dest_server);
-      if (src_server_index == OB_INVALID_INDEX || dest_server_index == OB_INVALID_INDEX)
-      {
-        TBSYS_LOG(ERROR," can not find server info");
-        ret = OB_ERROR;
+        TBSYS_LOG(INFO, "migrate_over received, src_cs=%s dest_cs=%s keep_src=%d range=%s", 
+                  f_server, t_server, keep_src, row_key_dump_buff);
       }
 
-      if (OB_SUCCESS == ret)
+      int src_server_index = get_server_index(src_server);
+      int dest_server_index = get_server_index(dest_server);
+
+      ObRootTable2::const_iterator start_it;
+      ObRootTable2::const_iterator end_it;
+      tbsys::CThreadGuard mutex_gard(&root_table_build_mutex_);
+      tbsys::CWLockGuard guard(root_table_rwlock_);
+      int find_ret = root_table_for_query_->find_range(range, start_it, end_it);
+      if (OB_SUCCESS == find_ret && start_it == end_it)
       {
-        ObRootTable2::const_iterator start_it;
-        ObRootTable2::const_iterator end_it;
-        tbsys::CThreadGuard mutex_gard(&root_table_build_mutex_);
-        tbsys::CWLockGuard guard(root_table_rwlock_);
-        int find_ret = root_table_for_query_->find_range(range, start_it, end_it);
-        if (OB_SUCCESS == find_ret && start_it == end_it)
+        start_it->migrate_monotonic_time_ = 0;
+        if (keep_src)
         {
-          //int64_t max_tablet_version = root_table_for_query_->get_max_tablet_version(start_it);
-          //if (max_tablet_version > tablet_version)
-          //{
-          //  TBSYS_LOG(INFO ,"migrated tablet is old, ignore this max_tablet_version =%ld this version = %ld",
-          //      max_tablet_version, tablet_version);
-          //}
-          //else
+          if (OB_INVALID_INDEX == dest_server_index)
           {
-            if (is_master())
-            {
-              ret = log_worker_->cs_migrate_done(range, src_server, dest_server, keep_src, tablet_version);
-            }
-            start_it->migrate_monotonic_time_ = 0;
-            if (keep_src)
-            {
-              ret = root_table_for_query_->modify(start_it, dest_server_index, tablet_version);
-            }
-            else
-            {
-              ret = root_table_for_query_->replace(start_it, src_server_index, dest_server_index, tablet_version);
-            }
-            if (OB_SUCCESS == find_ret)
-            {
-              ObServerStatus* src_status = server_manager_.get_server_status(src_server_index);
-              ObServerStatus* dest_status = server_manager_.get_server_status(dest_server_index);
-              const common::ObTabletInfo* tablet_info = NULL;
-              tablet_info = ((const ObRootTable2*)root_table_for_query_)->get_tablet_info(start_it);
-              if (src_status != NULL && dest_status != NULL && tablet_info != NULL)
-              {
-                src_status->migrate_out_finish_time_ = 0;
-                dest_status->migrate_in_finish_time_ = 0;
-                if (!keep_src)
-                {
-                  src_status->disk_info_.set_used(src_status->disk_info_.get_used() - tablet_info->occupy_size_);
-                }
-                dest_status->disk_info_.set_used(dest_status->disk_info_.get_used() + tablet_info->occupy_size_);
-              }
-            }
+            // dest cs is down
+            TBSYS_LOG(WARN, "can not find cs, src=%d dest=%d", src_server_index, dest_server_index);
+            ret = OB_ENTRY_NOT_EXIST;
+          }
+          else
+          {
+            // add replica
+            ret = root_table_for_query_->modify(start_it, dest_server_index, tablet_version);
           }
         }
         else
         {
-          TBSYS_LOG(INFO, "can not find the right range ignore this");
+          // dest_server_index and src_server_index may be INVALID
+          ret = root_table_for_query_->replace(start_it, src_server_index, dest_server_index, tablet_version);
+        }
+        if (OB_SUCCESS == find_ret)
+        {
+          ObServerStatus* src_status = server_manager_.get_server_status(src_server_index);
+          ObServerStatus* dest_status = server_manager_.get_server_status(dest_server_index);
+          const common::ObTabletInfo* tablet_info = NULL;
+          tablet_info = ((const ObRootTable2*)root_table_for_query_)->get_tablet_info(start_it);
+          if (src_status != NULL && dest_status != NULL && tablet_info != NULL)
+          {
+            if (!keep_src)
+            {
+              if (OB_INVALID_INDEX != src_server_index)
+              {
+                src_status->disk_info_.set_used(src_status->disk_info_.get_used() - tablet_info->occupy_size_);
+              }
+            }
+            if (OB_INVALID_INDEX != dest_server_index)
+            {
+              dest_status->disk_info_.set_used(dest_status->disk_info_.get_used() + tablet_info->occupy_size_);
+            }
+          }
+        }
+        if (is_master())
+        {
+          ret = log_worker_->cs_migrate_done(range, src_server, dest_server, keep_src, tablet_version);
+        }
+        if (is_master() || balance_testing_)
+        {
+          nb_trigger_next_migrate(range, src_server_index, dest_server_index, keep_src);
         }
       }
+      else
+      {
+        TBSYS_LOG(INFO, "can not find the right range ignore this");
+      }
+
       return ret;
     }
+
     int ObRootServer2::make_out_cell(ObCellInfo& out_cell, ObRootTable2::const_iterator first, 
         ObRootTable2::const_iterator last, ObScanner& scanner, const int32_t max_row_count, const int32_t max_key_len) const
     {
@@ -1721,6 +2230,7 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
         memset(max_row_key, 0xff, OB_MAX_ROW_KEY_LENGTH);
         c = 1;
       }
+
       const common::ObTabletInfo* tablet_info = NULL;
       int count = 0;
       ObRootTable2::const_iterator it = first;
@@ -1742,14 +2252,14 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
         count++;
         //start one row
         out_cell.column_name_ = s_root_occupy_size;
-        out_cell.value_.set_int(tablet_info->row_count_);
+        out_cell.value_.set_int(tablet_info->occupy_size_);
         if (OB_SUCCESS != (ret = scanner.add_cell(out_cell)))
         {
           break;
         }
 
         out_cell.column_name_ = s_root_record_count;
-        out_cell.value_.set_int(tablet_info->occupy_size_);
+        out_cell.value_.set_int(tablet_info->row_count_);
         if (OB_SUCCESS != (ret = scanner.add_cell(out_cell)))
         {
           break;
@@ -1798,6 +2308,10 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
           {
             break;
           }
+        }
+        else
+        {
+          TBSYS_LOG(INFO,"make_out_cell:%ld",it->server_info_indexes_[0]);
         }
         if (it->server_info_indexes_[1] != OB_INVALID_INDEX && 
             (server_status = server_manager_.get_server_status(it->server_info_indexes_[1])) != NULL)
@@ -1874,24 +2388,57 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
       return ret;
     }
 
-    int ObRootServer2::find_root_table_key(const common::ObString& table_name, const common::ObString& key, common::ObScanner& scanner) const
-    {
-      int32_t max_key_len = 0;
-      uint64_t table_id = get_table_info(table_name, max_key_len);
-      return find_root_table_key(table_id, table_name, max_key_len, key, scanner);
-    }
-    int ObRootServer2::find_root_table_key(const uint64_t table_id, const common::ObString& key, common::ObScanner& scanner) const
+int ObRootServer2::find_root_table_key(const common::ObGetParam& get_param, common::ObScanner& scanner) const
+{
+  int ret = OB_SUCCESS;
+  const ObCellInfo* cell = NULL;
+  
+  if (NULL == (cell = get_param[0]))
+  {
+    TBSYS_LOG(WARN, "invalid get_param, cell_size=%ld", get_param.get_cell_size());
+    ret = OB_INVALID_ARGUMENT;
+  }
+  else if (get_param.get_is_read_consistency() && obi_role_.get_role() != ObiRole::MASTER)
+  {
+    TBSYS_LOG(WARN, "we are not a master instance");
+    ret = OB_NOT_MASTER;
+  }
+  else
+  {
+    int8_t rt_type = 0;
+    UNUSED(rt_type); // for now we ignore this; OP_RT_TABLE_TYPE or OP_RT_TABLE_INDEX_TYPE
+
+    if (cell->table_id_ != 0 && cell->table_id_ != OB_INVALID_ID)
     {
       char table_name_buff[OB_MAX_TABLE_NAME_LENGTH];
       ObString table_name(OB_MAX_TABLE_NAME_LENGTH, 0, table_name_buff);
       int32_t max_key_len = 0;
-      int ret = get_table_info(table_id, table_name, max_key_len);
-      if (OB_SUCCESS == ret) 
+      if (OB_SUCCESS != (ret = get_table_info(cell->table_id_, table_name, max_key_len)))
       {
-        ret = find_root_table_key(table_id, table_name, max_key_len, key, scanner);
+        TBSYS_LOG(WARN, "failed to get table name, err=%d table_id=%lu", ret, cell->table_id_);
       }
-      return ret;
+      else if (OB_SUCCESS != (ret = find_root_table_key(cell->table_id_, table_name, max_key_len, cell->row_key_, scanner)))
+      {
+        TBSYS_LOG(WARN, "failed to get tablet, err=%d table_id=%lu", ret, cell->table_id_);
+      }
     }
+    else
+    {
+      int32_t max_key_len = 0;
+      uint64_t table_id = get_table_info(cell->table_name_, max_key_len);
+      if (OB_INVALID_ID == table_id)
+      {
+        TBSYS_LOG(WARN, "failed to get table id, err=%d", ret);
+      }
+      else if (OB_SUCCESS != (ret = find_root_table_key(table_id, cell->table_name_, max_key_len, cell->row_key_, scanner)))
+      {
+        TBSYS_LOG(WARN, "failed to get tablet, err=%d table_id=%lu", ret, cell->table_id_);
+      }
+    }
+  }
+  return ret;
+}
+
     int ObRootServer2::find_root_table_key(const uint64_t table_id, const ObString& table_name, const int32_t max_key_len, const common::ObString& key, ObScanner& scanner) const
     {
       int ret = OB_SUCCESS;
@@ -1933,10 +2480,13 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
       }
       return ret;
     }
-    int ObRootServer2::find_root_table_range(const ObString& table_name, const common::ObRange& key_range, ObScanner& scanner) const
+
+    int ObRootServer2::find_root_table_range(const common::ObScanParam& scan_param, ObScanner& scanner) const
     {
 
       int ret = OB_SUCCESS;
+      const ObString &table_name = scan_param.get_table_name();
+      const ObRange &key_range = *scan_param.get_range();
       int32_t max_key_len = 0;
       uint64_t table_id = get_table_info(table_name, max_key_len);
 
@@ -1945,8 +2495,12 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
         TBSYS_LOG(WARN,"table name are invaild");
         ret = OB_INVALID_ARGUMENT;
       }
-
-      if (OB_SUCCESS == ret) 
+      else if (scan_param.get_is_read_consistency() && obi_role_.get_role() != ObiRole::MASTER)
+      {
+        TBSYS_LOG(INFO, "we are not a master instance");
+        ret = OB_NOT_MASTER;
+      }
+      else 
       {
         ObCellInfo out_cell;
         out_cell.table_name_ = table_name;
@@ -2028,10 +2582,11 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
         char f_server[OB_IP_STR_BUFF];
         server.to_string(f_server, OB_IP_STR_BUFF);
         TBSYS_LOG(INFO, "waiting_job_done server is %s update_server_status_.status_ %d", 
-            f_server, update_server_status_.status_);
+                  f_server, update_server_status_.status_);
       }
       if (update_server_status_.server_ == server)
       {
+        // updateserver
         if (update_server_status_.status_ == ObServerStatus::STATUS_REPORTING)
         {
           if (is_master())
@@ -2044,6 +2599,7 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
       }
       else
       {
+        // chunkserver
         if (is_master())
         {
           log_worker_->cs_merge_over(server, frozen_mem_version);
@@ -2053,7 +2609,7 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
         it = server_manager_.find_by_ip(server);
         if (it != server_manager_.end())
         {
-          TBSYS_LOG(INFO, " it->status_ ObServerStatus::STATUS_REPORTING %ld %d,froze version:%ld", it->status_, ObServerStatus::STATUS_REPORTING,frozen_mem_version_);
+          TBSYS_LOG(INFO, "waiting_job_done it->status_ ObServerStatus::STATUS_REPORTING %ld %d,froze version:%ld", it->status_, ObServerStatus::STATUS_REPORTING,frozen_mem_version_);
           if (it->status_ == ObServerStatus::STATUS_REPORTING)
           {
             it->status_ = ObServerStatus::STATUS_REPORTED;
@@ -2112,25 +2668,28 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
       it = server_manager_.find_by_ip(server);
       if (it != server_manager_.end())
       {
-        ret = it - server_manager_.begin();
+        if (ObServerStatus::STATUS_DEAD != it->status_)
+        {
+          ret = it - server_manager_.begin();
+        }
       }
       return ret;
     }
     int ObRootServer2::report_tablets(const ObServer& server, const ObTabletReportInfoList& tablets, const int64_t frozen_mem_version)
     {
       int return_code = OB_SUCCESS;
+      char t_server[OB_IP_STR_BUFF];
+      server.to_string(t_server, OB_IP_STR_BUFF);
       int server_index = get_server_index(server);
       if (server_index == OB_INVALID_INDEX)
       {
-        TBSYS_LOG(ERROR, "can not find server's info");
-        return_code = OB_ERROR;
+        TBSYS_LOG(WARN, "can not find server's info, server=%s", t_server);
+        return_code = OB_ENTRY_NOT_EXIST;
       }
       else
       {
-        char t_server[OB_IP_STR_BUFF];
-        server.to_string(t_server, OB_IP_STR_BUFF);
-        TBSYS_LOG_US(INFO, "report tablets, server=%d ip=%s count=%ld version=%ld", 
-            server_index, t_server, tablets.tablet_list_.get_array_index());
+        TBSYS_LOG_US(INFO, "[NOTICE] report tablets, server=%d ip=%s count=%ld version=%ld", 
+                     server_index, t_server, tablets.tablet_list_.get_array_index(), frozen_mem_version);
         if (is_master())
         {
           log_worker_->report_tablets(server, tablets, frozen_mem_version);
@@ -2214,7 +2773,12 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
             //{
             //  continue;
             //}
-
+            if (!p_table_info->tablet_info_.range_.border_flag_.is_left_open_right_closed())
+            {
+              static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
+              p_table_info->tablet_info_.range_.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
+              TBSYS_LOG(WARN, "cs reported illegal tablet, server=%d range=%s", server_index, row_key_dump_buff);
+            }
             tablet_info = NULL;
             find_ret = root_table_for_query_->find_range(p_table_info->tablet_info_.range_, first, last);
             TBSYS_LOG(DEBUG, "root_table_for_query_->find_range ret = %d", find_ret);
@@ -2260,7 +2824,6 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
               TBSYS_LOG(INFO, "%s", row_key_dump_buff);
               //p_table_info->tablet_info_.range_.hex_dump(TBSYS_LOG_LEVEL_INFO);
             }
-
           }
         }
       } //end else, release lock
@@ -2541,10 +3104,13 @@ inline int ObRootServer2::need_copy(int32_t available_num, int32_t lost_num)
       }
       else
       {
-        //tablet.range_.hex_dump();
         static char row_key_dump_buff[OB_MAX_ROW_KEY_LENGTH * 2];
         tablet.range_.to_string(row_key_dump_buff, OB_MAX_ROW_KEY_LENGTH * 2);
-        TBSYS_LOG(DEBUG, "add a tablet, server=%d crc=%lu range=%s", server_index, tablet.crc_sum_, row_key_dump_buff);
+        if (!tablet.range_.border_flag_.is_left_open_right_closed())
+        {
+          TBSYS_LOG(WARN, "cs reported illegal tablet, server=%d crc=%lu range=%s", server_index, tablet.crc_sum_, row_key_dump_buff);
+        }
+        TBSYS_LOG(DEBUG, "add a tablet, server=%d crc=%lu version=%ld range=%s", server_index, tablet.crc_sum_, version, row_key_dump_buff);
         //TODO(maoqi) check the table of this tablet is exist in schema
         //if (schema_manager_->get_table_schema(tablet.range_.table_id_) != NULL)
         //{
@@ -2594,10 +3160,13 @@ void ObRootServer2::get_available_servers_for_new_table(int* server_index, int32
           TBSYS_LOG(ERROR, "sync schema error, err=%d", ret);
         }
         this->create_new_table();
-        ret = worker_->up_switch_schema(update_server_status_.server_, schema_manager_);
+        ret = worker_->get_rpc_stub().switch_schema(update_server_status_.server_, *schema_manager_, worker_->get_rpc_timeout());
         if (OB_SUCCESS != ret)
         {
-          TBSYS_LOG(ERROR, "up_switch_schema error, ret=%d schema_manager_=%p", ret, schema_manager_);
+          TBSYS_LOG(WARN, "up_switch_schema error, ret=%d schema_manager_=%p, "
+              "this may be caused by OBI state, switch schema in slave cluster "
+              "will not affect Updateserver schema",
+              ret, schema_manager_);
         }
       }
     }
@@ -2626,29 +3195,39 @@ void ObRootServer2::get_available_servers_for_new_table(int* server_index, int32
 int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, const int32_t* t_server_index, const int32_t replicas_num, const int64_t mem_version)
     {
       int ret = OB_SUCCESS;
-      ObRootTable2* root_table_for_create = NULL;
-      root_table_for_create = new(std::nothrow) ObRootTable2(NULL);
-      if (root_table_for_create == NULL) 
+      if (NULL != root_table_for_build_)
       {
-        TBSYS_LOG(ERROR, "new ObRootTable2 error");
-        ret = OB_ERROR;
+        tbsys::CThreadGuard guard_build(&root_table_build_mutex_);
+        TBSYS_LOG(INFO, "replay log create_new_table and we are initializing");
+        ret = root_table_for_build_->create_table(tablet, t_server_index, replicas_num, mem_version);
       }
-      if (NULL != root_table_for_create)
-      {
-        *root_table_for_create = *root_table_for_query_;
-      }
-      if (OB_SUCCESS == ret)
-      {
-
-        root_table_for_create->create_table(tablet, t_server_index, replicas_num, mem_version);
-        tbsys::CWLockGuard guard(root_table_rwlock_);
-        delete root_table_for_query_;
-        root_table_for_query_ = root_table_for_create;
-        root_table_for_create = NULL;
-      }
-      if (root_table_for_create != NULL)
-      {
-        delete root_table_for_create;
+      else
+      {        
+        ObRootTable2* root_table_for_create = NULL;
+        root_table_for_create = new(std::nothrow) ObRootTable2(NULL);
+        if (root_table_for_create == NULL) 
+        {
+          TBSYS_LOG(ERROR, "new ObRootTable2 error");
+          ret = OB_ERROR;
+        }
+        if (NULL != root_table_for_create)
+        {
+          *root_table_for_create = *root_table_for_query_;
+        }
+        if (OB_SUCCESS == ret)
+        {
+          root_table_for_create->create_table(tablet, t_server_index, replicas_num, mem_version);
+          tbsys::CWLockGuard guard(root_table_rwlock_);
+          TBSYS_LOG(INFO, "delete old query table, addr=%p", root_table_for_query_);
+          delete root_table_for_query_;
+          root_table_for_query_ = root_table_for_create;
+          TBSYS_LOG(INFO, "new root table created, root_table_for_query=%p", root_table_for_query_);
+          root_table_for_create = NULL;
+        }
+        if (root_table_for_create != NULL)
+        {
+          delete root_table_for_create;
+        }
       }
       return ret;
     }
@@ -2667,18 +3246,24 @@ int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, co
       ObRootTable2* root_table_for_create = root_table_tmp;
       int ret = OB_SUCCESS;
       
-      if (root_table_for_create != NULL)
+      if (ObiRole::INIT == obi_role_.get_role())
+      {
+        TBSYS_LOG(WARN, "cannot create new table when obi_role=INIT");
+        ret = OB_NOT_INIT;
+      }
+
+      if (OB_SUCCESS == ret && root_table_for_create != NULL)
       {
         int64_t mem_froze_version = 0;
         int retry_time = 0;
-        while (OB_SUCCESS != (ret = worker_->ups_get_last_frozen_memtable_version(update_server_status_.server_, mem_froze_version)))
+        while (OB_SUCCESS != (ret = worker_->get_rpc_stub().get_last_frozen_version(update_server_status_.server_, worker_->get_rpc_timeout(), mem_froze_version)))
         {
           retry_time++;
           if (retry_time >= 3) break;
           sleep(WAIT_SECONDS * retry_time);
         }
 
-        if (OB_SUCCESS == ret)
+        if (OB_SUCCESS == ret && 0 <= mem_froze_version)
         {
           for (const ObTableSchema* it=schema->table_begin(); it != schema->table_end(); ++it)
           {
@@ -2697,6 +3282,7 @@ int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, co
                 created_count = 0;
                 for (int i = 0; i < results_num; ++i)
                 {
+                  TBSYS_LOG(INFO,"in create_table_in_init,server_index[i]:%d",server_index[i]);
                   if (server_index[i] != OB_INVALID_INDEX) 
                   {
                     server_status = server_manager_.get_server_status(server_index[i]);
@@ -2704,7 +3290,7 @@ int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, co
                     {
                       server = server_status->server_;
                       server.set_port(server_status->port_cs_);
-                      if (OB_SUCCESS == worker_->cs_create_tablet(server, tablet.range_, mem_froze_version))
+                      if (OB_SUCCESS == worker_->get_rpc_stub().create_tablet(server, tablet.range_, mem_froze_version, worker_->get_rpc_timeout()))
                       {
                         t_server_index[created_count] = server_index[i];
                         created_count++;
@@ -2714,22 +3300,31 @@ int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, co
                     }
                     else
                     {
+                      TBSYS_LOG(WARN,"get server status failed");
                       server_index[i] = OB_INVALID_INDEX;
                     }
                   }
-                }
+                } // end for
                 if (created_count > 0)
                 {
                   ret = root_table_for_create->create_table(tablet, t_server_index, created_count, mem_froze_version);
+                  if (is_master())
+                  {
+                    log_worker_->add_new_tablet(created_count, tablet, t_server_index, mem_froze_version);
+                  }
                 }
               }
             }
-          }
+          } // end for
         }
         else
         {
-          TBSYS_LOG(ERROR, "get ups_get_last_frozen_memtable_version error %d, ignore create table", ret);
+          TBSYS_LOG(ERROR, "get ups_get_last_frozen_memtable_version error, err=%d frozen_version=%ld", ret, mem_froze_version);
         }
+      }
+      if (is_master())
+      {
+        log_worker_->create_table_done();
       }
     }
 
@@ -2777,13 +3372,13 @@ int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, co
       {
         int64_t mem_froze_version = 0;
         int retry_time = 0;
-        while (OB_SUCCESS != (ret = worker_->ups_get_last_frozen_memtable_version(update_server_status_.server_, mem_froze_version)))
+        while (OB_SUCCESS != (ret = worker_->get_rpc_stub().get_last_frozen_version(update_server_status_.server_, worker_->get_rpc_timeout(), mem_froze_version)))
         {
           retry_time++;
           if (retry_time >= 3) break;
           sleep(WAIT_SECONDS);
         }
-        if (OB_SUCCESS == ret)
+        if (OB_SUCCESS == ret && 0 <= mem_froze_version)
         {
           for (const ObTableSchema* it=schema->table_begin(); it != schema->table_end(); ++it)
           {
@@ -2809,7 +3404,7 @@ int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, co
                     {
                       server = server_status->server_;
                       server.set_port(server_status->port_cs_);
-                      if (OB_SUCCESS == worker_->cs_create_tablet(server, tablet.range_, mem_froze_version))
+                      if (OB_SUCCESS == worker_->get_rpc_stub().create_tablet(server, tablet.range_, mem_froze_version, worker_->get_rpc_timeout()))
                       {
                         t_server_index[created_count] = server_index[i];
                         created_count++;
@@ -2845,7 +3440,7 @@ int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, co
         }
         else
         {
-          TBSYS_LOG(ERROR, "get ups_get_last_frozen_memtable_version error %d, ignore create table", ret);
+          TBSYS_LOG(ERROR, "get ups_get_last_frozen_memtable_version error, err=%d frozen_version=%ld", ret, mem_froze_version);
         }
       }
       if (is_master())
@@ -2969,13 +3564,17 @@ int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, co
         TBSYS_LOG(ERROR, "generate root table file name [%s] failed, error: %s", filename, strerror(errno));
         ret = OB_ERROR;
       }
-
+      
       if (ret == OB_SUCCESS)
       {
         ret = root_table_for_query_->read_from_file(filename);
         if (ret != OB_SUCCESS)
         {
           TBSYS_LOG(ERROR, "recover root table from file [%s] failed, err=%d", filename, ret);
+        }
+        else
+        {
+          TBSYS_LOG(INFO, "recover root table, size=%ld", root_table_for_query_->end() - root_table_for_query_->begin());
         }
       }
 
@@ -2988,10 +3587,21 @@ int ObRootServer2::slave_create_new_table(const common::ObTabletInfo& tablet, co
 
       if (ret == OB_SUCCESS)
       {
-        ret = server_manager_.read_from_file(filename);
+        int32_t cs_num = 0;
+        int32_t ms_num = 0;
+        
+        ret = server_manager_.read_from_file(filename, cs_num, ms_num);
         if (ret != OB_SUCCESS)
         {
           TBSYS_LOG(ERROR, "recover chunkserver list from file [%s] failed, err=%d", filename, ret);
+        }
+        else
+        {
+          TBSYS_LOG(INFO, "recover server list, cs_num=%d ms_num=%d", cs_num, ms_num);
+        }
+        if (0 < cs_num)
+        {
+          first_cs_had_registed_ = true;
         }
       }
 
@@ -3068,6 +3678,297 @@ void ObRootServer2::wait_init_finished()
   TBSYS_LOG(INFO, "rootserver2 init finished");
 }
 
+const ObiRole& ObRootServer2::get_obi_role() const
+{
+  return obi_role_;
+}
+
+int ObRootServer2::set_obi_role(const ObiRole& role)
+{
+  int ret = OB_SUCCESS;
+  // send request to the updateserver
+  if (ObiRole::MASTER != role.get_role()
+      && ObiRole::SLAVE != role.get_role())
+  {
+    TBSYS_LOG(WARN, "invalid obi role, role=%d", role.get_role());
+    ret = OB_INVALID_ARGUMENT;
+  }
+  else if (obi_role_ == role)
+  {
+    TBSYS_LOG(WARN, "obi role already is %s", role.get_role_str());
+    ret = OB_INIT_TWICE;
+  }
+  else 
+  {
+    if (is_master())
+    {
+      if (OB_SUCCESS != (ret = worker_->get_rpc_stub().set_obi_role(update_server_status_.server_, role, worker_->get_rpc_timeout())))
+      {
+        TBSYS_LOG(INFO, "failed to set updateserver's obi role, err=%d", ret);
+      }
+    }
+    if (OB_SUCCESS == ret)
+    {
+      obi_role_.set_role(role.get_role());
+    }
+  }
+  TBSYS_LOG(INFO, "set obi role, role=%s ret=%d", role.get_role() == ObiRole::MASTER ? "MASTER":"SLAVE", ret);
+  return ret;
+}
+
+int ObRootServer2::get_obi_config(common::ObiConfig& obi_config) const
+{
+  int ret = OB_ENTRY_NOT_EXIST;
+  for (int i = 0; i < client_config_.obi_list_.obi_count_; ++i)
+  {
+    if (client_config_.obi_list_.conf_array_[i].get_rs_addr() == my_addr_)
+    {
+      obi_config = client_config_.obi_list_.conf_array_[i];
+      ret = OB_SUCCESS;
+      break;
+    }
+  }
+  return ret;
+}
+
+int ObRootServer2::set_obi_config(const common::ObiConfig& conf)
+{
+  return set_obi_config(my_addr_, conf);
+}
+
+int ObRootServer2::set_obi_config(const common::ObServer &rs_addr, const common::ObiConfig& conf)
+{
+  int ret = OB_SUCCESS;
+  if (0 > conf.get_read_percentage() || 100 < conf.get_read_percentage())
+  {
+    TBSYS_LOG(WARN, "invalid param, read_percentage=%d", conf.get_read_percentage());
+    ret = OB_INVALID_ARGUMENT;
+  }
+  else
+  {
+    ret = OB_ENTRY_NOT_EXIST;
+    for (int i = 0; i < client_config_.obi_list_.obi_count_; ++i)
+    {
+      if (client_config_.obi_list_.conf_array_[i].get_rs_addr() == rs_addr)
+      {
+        client_config_.obi_list_.conf_array_[i].set_read_percentage(conf.get_read_percentage());
+        client_config_.obi_list_.print();
+        if (is_master())
+        {
+          if (OB_SUCCESS != (ret = log_worker_->set_client_config(client_config_)))
+          {
+            TBSYS_LOG(ERROR, "write log error, err=%d", ret);
+          }
+        }
+        ret = OB_SUCCESS;
+        break;
+      }
+    }
+  }
+  return ret;
+}
+
+void ObRootServer2::do_stat_common(char *buf, const int64_t buf_len, int64_t& pos)
+{
+  do_stat_start_time(buf, buf_len, pos);
+  do_stat_local_time(buf, buf_len, pos);
+  databuff_printf(buf, buf_len, pos, "prog_version: %s(%s)\n", PACKAGE_STRING, RELEASEID);
+  databuff_printf(buf, buf_len, pos, "pid: %d\n", getpid());
+  databuff_printf(buf, buf_len, pos, "obi_role: %s\n", obi_role_.get_role_str());
+}
+
+void ObRootServer2::do_stat_start_time(char *buf, const int64_t buf_len, int64_t& pos)
+{
+  databuff_printf(buf, buf_len, pos, "start_time: %s", ctime(&start_time_));
+}
+
+void ObRootServer2::do_stat_local_time(char *buf, const int64_t buf_len, int64_t& pos)
+{
+  time_t now = time(NULL);
+  databuff_printf(buf, buf_len, pos, "local_time: %s", ctime(&now));
+}
+
+void ObRootServer2::do_stat_schema_version(char* buf, const int64_t buf_len, int64_t &pos)
+{
+  tbsys::CRLockGuard guard(schema_manager_rwlock_);
+  int64_t schema_version = schema_manager_->get_version();
+  tbutil::Time schema_time = tbutil::Time::microSeconds(schema_version);
+  struct timeval schema_tv(schema_time);
+  struct tm stm;
+  localtime_r(&schema_tv.tv_sec, &stm);
+  char time_buf[32];
+  strftime(time_buf, sizeof(time_buf), "%F %H:%M:%S", &stm);
+  databuff_printf(buf, buf_len, pos, "schema_version: %lu(%s)", schema_version, time_buf);
+}
+
+void ObRootServer2::do_stat_frozen_time(char* buf, const int64_t buf_len, int64_t &pos)
+{
+  tbutil::Time frozen_time = tbutil::Time::microSeconds(last_frozen_time_);
+  struct timeval frozen_tv(frozen_time);
+  struct tm stm;
+  localtime_r(&frozen_tv.tv_sec, &stm);
+  char time_buf[32];
+  strftime(time_buf, sizeof(time_buf), "%F %H:%M:%S", &stm);
+  databuff_printf(buf, buf_len, pos, "frozen_time: %lu(%s)", last_frozen_time_, time_buf);  
+}
+
+void ObRootServer2::do_stat_mem(char* buf, const int64_t buf_len, int64_t &pos)
+{
+  struct mallinfo minfo = mallinfo();
+  databuff_printf(buf, buf_len, pos, "mem: arena=%d ordblks=%d hblkhd=%d uordblks=%d fordblks=%d keepcost=%d", 
+                 minfo.arena, minfo.ordblks, minfo.hblkhd, minfo.uordblks, minfo.fordblks, minfo.keepcost);
+}
+
+void ObRootServer2::do_stat_table_num(char* buf, const int64_t buf_len, int64_t &pos)
+{
+  int num = -1;
+  tbsys::CRLockGuard guard(schema_manager_rwlock_);
+  if (NULL != schema_manager_)
+  {
+    num = schema_manager_->table_end() - schema_manager_->table_begin();
+  }
+  databuff_printf(buf, buf_len, pos, "table_num: %d", num);
+}
+
+void ObRootServer2::do_stat_tablet_num(char* buf, const int64_t buf_len, int64_t &pos)
+{
+  int num = -1;
+  tbsys::CRLockGuard guard(root_table_rwlock_);
+  if (NULL != tablet_manager_for_query_)
+  {
+    num = tablet_manager_for_query_->end() - tablet_manager_for_query_->begin();
+  }
+  databuff_printf(buf, buf_len, pos, "tablet_num: %d", num);
+}
+
+void ObRootServer2::do_stat_cs(char* buf, const int64_t buf_len, int64_t &pos)
+{
+  char server_str[OB_IP_STR_BUFF];
+  ObServer tmp_server;
+  databuff_printf(buf, buf_len, pos, "chunkservers: ");
+  ObChunkServerManager::iterator it = server_manager_.begin();
+  for (; it != server_manager_.end(); ++it)
+  {
+    if (it->port_cs_ != 0
+        && it->status_ != ObServerStatus::STATUS_DEAD)
+    {
+      tmp_server = it->server_;
+      tmp_server.set_port(it->port_cs_);
+      tmp_server.to_string(server_str, OB_IP_STR_BUFF);
+      databuff_printf(buf, buf_len, pos, "%s ", server_str);
+    }
+  }
+}
+
+void ObRootServer2::do_stat_ms(char* buf, const int64_t buf_len, int64_t &pos)
+{
+  char server_str[OB_IP_STR_BUFF];
+  ObServer tmp_server;
+  databuff_printf(buf, buf_len, pos, "mergeservers: ");
+  ObChunkServerManager::iterator it = server_manager_.begin();
+  for (; it != server_manager_.end(); ++it)
+  {
+    if (it->port_ms_ != 0
+        && it->ms_status_ != ObServerStatus::STATUS_DEAD)
+    {
+      tmp_server = it->server_;
+      tmp_server.set_port(it->port_ms_);
+      tmp_server.to_string(server_str, OB_IP_STR_BUFF);
+      databuff_printf(buf, buf_len, pos, "%s ", server_str);
+    }
+  }
+}
+
+void ObRootServer2::do_stat_ups(char* buf, const int64_t buf_len, int64_t &pos)
+{
+  char server_str[OB_IP_STR_BUFF];
+  update_server_status_.server_.to_string(server_str, OB_IP_STR_BUFF);
+  databuff_printf(buf, buf_len, pos, "ups: %s(%d master)|", server_str, ups_inner_port_);
+  ups_list_.print(buf, buf_len, pos);
+}
+
+void ObRootServer2::do_stat_client_config(char* buf, const int64_t buf_len, int64_t &pos)
+{
+  databuff_printf(buf, buf_len, pos, "client_config:\n");
+  client_config_.print(buf, buf_len, pos);
+}
+
+int ObRootServer2::do_stat(int stat_key, char *buf, const int64_t buf_len, int64_t& pos)
+{
+  int ret = OB_SUCCESS;
+  switch(stat_key)
+  {
+    case OB_RS_STAT_COMMON:
+      do_stat_common(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_START_TIME:
+      do_stat_start_time(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_LOCAL_TIME:
+      do_stat_local_time(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_PROGRAM_VERSION:
+      databuff_printf(buf, buf_len, pos, "prog_version: %s(%s)", PACKAGE_STRING, RELEASEID);
+      break;
+    case OB_RS_STAT_PID:
+      databuff_printf(buf, buf_len, pos, "pid: %d", getpid());
+      break;
+    case OB_RS_STAT_MEM:
+      do_stat_mem(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_RS_STATUS:
+      databuff_printf(buf, buf_len, pos, "rs_status: %d", server_status_);
+      break;
+    case OB_RS_STAT_FROZEN_VERSION:
+      databuff_printf(buf, buf_len, pos, "frozen_version: %d", last_frozen_mem_version_);
+      break;
+    case OB_RS_STAT_SCHEMA_VERSION:
+      do_stat_schema_version(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_LOG_SEQUENCE:
+      databuff_printf(buf, buf_len, pos, "log_seq: %d", log_worker_->get_cur_log_seq());
+      break;
+    case OB_RS_STAT_LOG_FILE_ID:
+      databuff_printf(buf, buf_len, pos, "log_file_id: %d", log_worker_->get_cur_log_file_id());
+      break;
+    case OB_RS_STAT_TABLE_NUM:
+      do_stat_table_num(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_TABLET_NUM:
+      do_stat_tablet_num(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_CS:
+      do_stat_cs(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_MS:
+      do_stat_ms(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_UPS:
+      do_stat_ups(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_FROZEN_TIME:
+      do_stat_frozen_time(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_CLIENT_CONF:
+      do_stat_client_config(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_SSTABLE_DIST:
+      nb_print_balance_infos(buf, buf_len, pos);
+      break;
+    case OB_RS_STAT_CS_NUM:
+    case OB_RS_STAT_MS_NUM:
+    case OB_RS_STAT_RS_SLAVE:
+    case OB_RS_STAT_OPS_GET:
+    case OB_RS_STAT_OPS_SCAN:
+    case OB_RS_STAT_REPLICAS_NUM:
+    default:
+      databuff_printf(buf, buf_len, pos, "unknown or not implemented yet, stat_key=%d", stat_key);
+      break;
+  }
+  return ret;
+}
+
+
 int ObRootServer2::make_checkpointing()
 {
   tbsys::CRLockGuard rt_guard(root_table_rwlock_);
@@ -3086,6 +3987,87 @@ int ObRootServer2::make_checkpointing()
   return ret;
 }
 
+const common::ObUpsList &ObRootServer2::get_ups_list() const
+{
+  return ups_list_;
+}
+
+const common::ObClientConfig& ObRootServer2::get_client_config() const
+{
+  return client_config_;
+}
+
+int ObRootServer2::set_ups_config(const common::ObServer &ups, int32_t ms_read_percentage, int32_t cs_read_percentage)
+{
+  int ret = OB_ENTRY_NOT_EXIST;
+  if (0 > ms_read_percentage || 100 < ms_read_percentage)
+  {
+    TBSYS_LOG(WARN, "invalid param, ms_read_percentage=%d", ms_read_percentage);
+    ret = OB_INVALID_ARGUMENT;
+  }
+  else if (0 > cs_read_percentage || 100 < cs_read_percentage)
+  {
+    TBSYS_LOG(WARN, "invalid param, cs_read_percentage=%d", cs_read_percentage);
+    ret = OB_INVALID_ARGUMENT;
+  }
+  else
+  {
+    for (int32_t i = 0; i < ups_list_.ups_count_; ++i)
+    {
+      if (ups_list_.ups_array_[i].addr_ == ups)
+      {
+        ups_list_.ups_array_[i].ms_read_percentage_ = ms_read_percentage;
+        ups_list_.ups_array_[i].cs_read_percentage_ = cs_read_percentage;
+        char addr_buf[OB_IP_STR_BUFF];
+        ups_list_.ups_array_[i].addr_.to_string(addr_buf, OB_IP_STR_BUFF);
+        TBSYS_LOG(INFO, "set ups config, idx=%d addr=%s inner_port=%d ms_read_percentage=%hhd cs_read_percentage=%hhd",
+                  i, addr_buf, 
+                  ups_list_.ups_array_[i].inner_port_,
+                  ups_list_.ups_array_[i].ms_read_percentage_,
+                  ups_list_.ups_array_[i].cs_read_percentage_);
+        ret = OB_SUCCESS;
+        if (is_master())
+        {
+          if (OB_SUCCESS != (ret = log_worker_->set_ups_list(ups_list_)))
+          {
+            TBSYS_LOG(ERROR, "write log error, err=%d", ret);
+          }
+        }
+        break;
+      }
+    }
+  }
+  return ret;
+}
+
+int ObRootServer2::set_ups_list(const common::ObUpsList &ups_list)
+{
+  int ret = OB_SUCCESS;
+  ups_list_ = ups_list;
+  ups_list_.print();
+  return ret;
+}
+
+int ObRootServer2::set_client_config(const common::ObClientConfig &client_conf)
+{
+  int ret = OB_SUCCESS;
+  client_config_ = client_conf;
+  client_config_.print();
+  return ret;
+}
+
+int ObRootServer2::serialize_cs_list(char* buf, const int64_t buf_len, int64_t& pos) const
+{
+  return server_manager_.serialize_cs_list(buf, buf_len, pos);
+}
+
+int ObRootServer2::serialize_ms_list(char* buf, const int64_t buf_len, int64_t& pos) const
+{
+  return server_manager_.serialize_ms_list(buf, buf_len, pos);
+}
+
+
+////////////////////////////////////////////////////////////////
     ObRootServer2::rootTableModifier::rootTableModifier(ObRootServer2* root_server):root_server_(root_server)
     {
     }
@@ -3094,7 +4076,7 @@ int ObRootServer2::make_checkpointing()
     {
       UNUSED(thread);
       UNUSED(arg);
-      TBSYS_LOG(INFO, "root table modifier thread start");
+      TBSYS_LOG(INFO, "[NOTICE] root table modifier thread start");
       bool init_process = false;
       {
         tbsys::CThreadGuard guard(&(root_server_->status_mutex_));
@@ -3107,6 +4089,7 @@ int ObRootServer2::make_checkpointing()
       //for now report, switch, and balance are all in this thread, maybe we will use multithread later
       if (init_process)
       {
+        TBSYS_LOG(INFO, "init process");
         if ((OB_SUCCESS != root_server_->init_root_table_by_report()) || 
             (root_server_->build_sync_flag_ != BUILD_SYNC_INIT_OK))
         {
@@ -3114,7 +4097,12 @@ int ObRootServer2::make_checkpointing()
           exit(0);
         }
       }
-      TBSYS_LOG(INFO, "start service now");
+      else
+      {
+        root_server_->build_sync_flag_ = BUILD_SYNC_INIT_OK;
+        TBSYS_LOG(INFO, "don't need init process, server_status_=%d", root_server_->server_status_);
+      }
+      TBSYS_LOG(INFO, "[NOTICE] start service now");
 
       while (!_stop)
       {
@@ -3137,7 +4125,7 @@ int ObRootServer2::make_checkpointing()
         }
         sleep(1);
       }
-      TBSYS_LOG(INFO, "tableModifer thread exit");
+      TBSYS_LOG(INFO, "[NOTICE] root table modifier thread exit");
     }
 
     ObRootServer2::balanceWorker::balanceWorker(ObRootServer2* root_server):root_server_(root_server)
@@ -3147,44 +4135,38 @@ int ObRootServer2::make_checkpointing()
     {
       UNUSED(thread);
       UNUSED(arg);
+      TBSYS_LOG(INFO, "[NOTICE] balance worker thread start, wait_seconds=%d", 
+                root_server_->migrate_wait_seconds_);
       //TODO if this is not the first start up we will do sleep
       for (int i = 0; i < root_server_->migrate_wait_seconds_ && !_stop; i++)
       {
         sleep(1);
       }
-      TBSYS_LOG(INFO, "balance worker thread start");
+      TBSYS_LOG(INFO, "[NOTICE] balance working");
       while (!_stop)
       {
-        if (root_server_->is_master())
+        if (root_server_->is_master() || root_server_->balance_testing_)
         {
-          //TBSYS_LOG(DEBUG, "this one is master");
-          bool balance_it = false;
+          if (root_server_->enable_balance_ || root_server_->enable_rereplication_)
           {
-            tbsys::CThreadGuard guard(&(root_server_->status_mutex_));
-            if (root_server_->server_status_ == STATUS_SLEEP)
+            if (root_server_->nb_is_in_batch_migrating())
             {
-              balance_it = true;
-              root_server_->log_worker_->begin_balance();
-              root_server_->server_status_ = STATUS_BALANCING;
+              root_server_->nb_check_migrate_timeout();
             }
-          }
-          if (balance_it)
-          {
-            root_server_->do_balance();
-            tbsys::CThreadGuard guard(&(root_server_->status_mutex_));
-            if (root_server_->server_status_ == STATUS_BALANCING || STATUS_INTERRUPT_BALANCING == root_server_->server_status_)
+            else
             {
-              root_server_->log_worker_->balance_done();
-              root_server_->server_status_ = STATUS_SLEEP;
+              root_server_->do_new_balance();
             }
           }
         }
-        //for (int i = 0; i < 5 && !_stop; i++)
+        else
         {
-          sleep(1);
+          TBSYS_LOG(DEBUG, "not the master");
         }
+        int sleep_ms = root_server_->balance_worker_sleep_us_/1000;
+        root_server_->balance_worker_sleep_cond_.wait(sleep_ms);
       }
-      TBSYS_LOG(INFO, "balance worker exit");
+      TBSYS_LOG(INFO, "[NOTICE] balance worker thread exit");
     }
     ObRootServer2::heartbeatChecker::heartbeatChecker(ObRootServer2* root_server):root_server_(root_server)
     {
@@ -3207,14 +4189,12 @@ int ObRootServer2::make_checkpointing()
     {
       UNUSED(thread);
       UNUSED(arg);
-      //ObServer* will_heart_beat = new ObServer[ObChunkServerManager::MAX_SERVER_COUNT];
-      //ObArrayHelper<ObServer> server_need_hb;
       ObServer tmp_server;
       int64_t now = 0;
       int64_t preview_rotate_time = 0;
       bool need_report = false;
       bool need_balance = false;
-      TBSYS_LOG(INFO, "heart beat checker thread start");
+      TBSYS_LOG(INFO, "[NOTICE] heart beat checker thread start");
       while (!_stop)
       {
         need_report = false;
@@ -3251,8 +4231,8 @@ int ObRootServer2::make_checkpointing()
                     tmp_server.to_string(server_str, OB_IP_STR_BUFF);
                     //TBSYS_LOG(DEBUG, "send hb to %s", server_str);
                   }
-                  if (root_server_->worker_->hb_to_cs(tmp_server, root_server_->lease_duration_,
-                                                      root_server_->last_frozen_mem_version_) == OB_SUCCESS)
+                  if (root_server_->worker_->get_rpc_stub().heartbeat_to_cs(tmp_server, root_server_->lease_duration_,
+                                                                            root_server_->last_frozen_mem_version_) == OB_SUCCESS)
                   {
                     //do nothing
                   }
@@ -3269,6 +4249,8 @@ int ObRootServer2::make_checkpointing()
                 if (root_server_->root_table_for_query_ != NULL) 
                 {
                   root_server_->root_table_for_query_->server_off_line(it - root_server_->server_manager_.begin(), now);
+                  // some cs is down, signal the balance worker
+                  root_server_->balance_worker_sleep_cond_.broadcast();
                 }
                 else
                 {
@@ -3287,8 +4269,8 @@ int ObRootServer2::make_checkpointing()
                     //hb to ms
                     tmp_server = it->server_;
                     tmp_server.set_port(it->port_ms_);
-                    root_server_->worker_->hb_to_ms(tmp_server, root_server_->lease_duration_,
-                                                    root_server_->get_schema_version());
+                    root_server_->worker_->get_rpc_stub().heartbeat_to_ms(tmp_server, root_server_->lease_duration_,
+                                                                          root_server_->get_schema_version(), root_server_->get_obi_role());
                 }
               }
               else 
@@ -3301,11 +4283,9 @@ int ObRootServer2::make_checkpointing()
         //async heart beat
         usleep(10000);
       }
-      TBSYS_LOG(INFO, "heart beat checker exit");
-      //delete [] will_heart_beat;
+      TBSYS_LOG(INFO, "[NOTICE] heart beat checker thread exit");
     }
 
   }
 }
-
 

@@ -315,32 +315,14 @@ namespace oceanbase
       ObObj obj;
       obj.set_ext(ObActionFlag::BASIC_PARAM_FIELD);
       int ret = obj.serialize(buf, buf_len, pos);
-      // is cache
-      if (ret == OB_SUCCESS)
+      // read param info
+      if (OB_SUCCESS == ret)
       {
-        obj.set_int(ObReadParam::get_is_result_cached());
-        ret = obj.serialize(buf, buf_len, pos);
-      }
-      // scan version range
-      ObVersionRange version_range = ObReadParam::get_version_range();;
-      if (ret == OB_SUCCESS)
-      {
-        obj.set_int(version_range.border_flag_.get_data());
-        ret = obj.serialize(buf, buf_len, pos);
-        if (ret == OB_SUCCESS)
-        {
-          obj.set_int(version_range.start_version_);
-          ret = obj.serialize(buf, buf_len, pos);
-        }
-        if (ret == OB_SUCCESS)
-        {
-          obj.set_int(version_range.end_version_);
-          ret = obj.serialize(buf, buf_len, pos);
-        }
+        ret = ObReadParam::serialize(buf, buf_len, pos);
       }
 
       // table name or id
-      if (ret == OB_SUCCESS)
+      if (OB_SUCCESS == ret)
       {
         if (table_name_.length() > 0)
         {
@@ -375,16 +357,16 @@ namespace oceanbase
       }
 
       // scan range
-      if (ret == OB_SUCCESS)
+      if (OB_SUCCESS == ret)
       {
         obj.set_int(range_.border_flag_.get_data());
         ret = obj.serialize(buf, buf_len, pos);
-        if (ret == OB_SUCCESS)
+        if (OB_SUCCESS == ret)
         {
           obj.set_varchar(range_.start_key_);
           ret = obj.serialize(buf, buf_len, pos);
         }
-        if (ret == OB_SUCCESS)
+        if (OB_SUCCESS == ret)
         {
           obj.set_varchar(range_.end_key_);
           ret = obj.serialize(buf, buf_len, pos);
@@ -392,12 +374,12 @@ namespace oceanbase
       }
 
       // scan direction
-      if (ret == OB_SUCCESS)
+      if (OB_SUCCESS == ret)
       {
         obj.set_int(*reinterpret_cast<const int64_t*>(&scan_flag_));
         ret = obj.serialize(buf, buf_len, pos);
         // scan size
-        if (ret == OB_SUCCESS)
+        if (OB_SUCCESS == ret)
         {
           obj.set_int(scan_size_);
           ret = obj.serialize(buf, buf_len, pos);
@@ -405,68 +387,13 @@ namespace oceanbase
       }
       return ret;
     }
-
-    int ObScanParam::deserialize_basic_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj)
+    
+    int ObScanParam::deserialize_basic_param(const char * buf, const int64_t data_len, int64_t & pos)
     {
       int64_t int_value = 0;
-      //is cached
-      int ret = obj.deserialize(buf, data_len, pos);
-      if (OB_SUCCESS == ret)
-      {
-        ret = obj.get_int(int_value);
-        if (OB_SUCCESS == ret)
-        {
-          set_is_result_cached(int_value);
-        }
-      }
-
-      // version range
-      if (OB_SUCCESS == ret)
-      {
-        // border flag
-        ObVersionRange version_range;
-        ret = obj.deserialize(buf, data_len, pos);
-        if (OB_SUCCESS == ret)
-        {
-          ret = obj.get_int(int_value);
-          if (OB_SUCCESS == ret)
-          {
-            version_range.border_flag_.set_data(int_value);
-          }
-        }
-
-        // start version
-        if (OB_SUCCESS == ret)
-        {
-          ret = obj.deserialize(buf, data_len, pos);
-          if (OB_SUCCESS == ret)
-          {
-            ret = obj.get_int(int_value);
-            if (OB_SUCCESS == ret)
-            {
-              version_range.start_version_ = int_value;
-            }
-          }
-        }
-
-        // end version
-        if (OB_SUCCESS == ret)
-        {
-          ret = obj.deserialize(buf, data_len, pos);
-          if (OB_SUCCESS == ret)
-          {
-            ret = obj.get_int(int_value);
-            if (OB_SUCCESS == ret)
-            {
-              version_range.end_version_ = int_value;
-              // set version range
-              set_version_range(version_range);
-            }
-          }
-        }
-      }
-
+      int ret = ObReadParam::deserialize(buf, data_len, pos);
       // table name or table id
+      ObObj obj;
       ObString str_value;
       if (OB_SUCCESS == ret)
       {
@@ -569,14 +496,9 @@ namespace oceanbase
           }
         }
       }
-      // next cell
-      if (OB_SUCCESS == ret)
-      {
-        ret = obj.deserialize(buf, data_len, pos);
-      }
       return ret;
     }
-
+    
     int64_t ObScanParam::get_basic_param_serialize_size(void) const
     {
       int64_t total_size = 0;
@@ -584,18 +506,10 @@ namespace oceanbase
       // BASIC_PARAM_FIELD
       obj.set_ext(ObActionFlag::BASIC_PARAM_FIELD);
       total_size += obj.get_serialize_size();
-      // is cache
-      obj.set_int(ObReadParam::get_is_result_cached());
-      total_size += obj.get_serialize_size();
+      
+      /// READ PARAM
+      total_size += ObReadParam::get_serialize_size();
 
-      // scan version range
-      ObVersionRange version_range = ObReadParam::get_version_range();;
-      obj.set_int(version_range.border_flag_.get_data());
-      total_size += obj.get_serialize_size();
-      obj.set_int(version_range.start_version_);
-      total_size += obj.get_serialize_size();
-      obj.set_int(version_range.end_version_);
-      total_size += obj.get_serialize_size();
       // table name id
       if (table_name_.length() > 0)
       {
@@ -630,7 +544,7 @@ namespace oceanbase
       ObObj obj;  
       obj.set_ext(ObActionFlag::COLUMN_PARAM_FIELD);
       int ret = obj.serialize(buf, buf_len, pos);
-      if (ret == OB_SUCCESS)
+      if (OB_SUCCESS == ret)
       {
         int64_t column_size = column_list_.get_array_index();
         int64_t column_id_size = column_id_list_.get_array_index();
@@ -640,7 +554,7 @@ namespace oceanbase
           ret = OB_ERROR;
         }
 
-        if (ret == OB_SUCCESS)
+        if (OB_SUCCESS == ret)
         {
           for (int64_t i = 0; i < column_size; ++i)
           {
@@ -666,14 +580,17 @@ namespace oceanbase
       return ret;
     }
 
-    int ObScanParam::deserialize_column_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj)
+    int ObScanParam::deserialize_column_param(const char * buf, const int64_t data_len, int64_t & pos)
     {
       int ret = OB_SUCCESS;
       int64_t int_value = 0;
       ObString str_value;
+      ObObj obj;
+      int64_t old_pos = pos;
       while ((OB_SUCCESS == (ret = obj.deserialize(buf, data_len, pos)))
              && (ObExtendType != obj.get_type()))
       {
+        old_pos = pos;
         if (ObIntType == obj.get_type())
         {
           ret = obj.get_int(int_value);
@@ -701,6 +618,8 @@ namespace oceanbase
           break;
         }
       }
+      // modify last pos for the last ext_type obj
+      pos = old_pos;
       return ret;
     }
 
@@ -736,7 +655,7 @@ namespace oceanbase
       int ret = obj.serialize(buf, buf_len, pos);
       int64_t orderby_column_size = orderby_column_name_list_.get_array_index();
       int64_t orderby_column_id_size = orderby_column_id_list_.get_array_index();
-      if (ret == OB_SUCCESS)
+      if (OB_SUCCESS == ret)
       {
         if ((orderby_column_size > 0) && (orderby_column_id_size > 0))
         {
@@ -782,14 +701,17 @@ namespace oceanbase
       return ret;
     }
 
-    int ObScanParam::deserialize_sort_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj)
+    int ObScanParam::deserialize_sort_param(const char * buf, const int64_t data_len, int64_t & pos)
     {
       int ret = OB_SUCCESS;
       int64_t int_value = 0;
       ObString str_value;
+      int64_t old_pos = pos;
+      ObObj obj;
       while ((OB_SUCCESS == (ret = obj.deserialize(buf, data_len, pos)))
              && (ObExtendType != obj.get_type()))
       {
+        old_pos = pos;
         // column 
         if (ObIntType == obj.get_type())
         {
@@ -835,6 +757,8 @@ namespace oceanbase
           break;
         }
       }
+      // modify last pos for the last ext_type obj
+      pos = old_pos;
       return ret;
     }
 
@@ -891,11 +815,12 @@ namespace oceanbase
       return ret;
     }
 
-    int ObScanParam::deserialize_limit_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj)
+    int ObScanParam::deserialize_limit_param(const char * buf, const int64_t data_len, int64_t & pos)
     {
       int ret = OB_SUCCESS;
       int64_t int_value = 0;
       ObString str_value;
+      ObObj obj;
       // offset
       ret = obj.deserialize(buf, data_len, pos);
       if (OB_SUCCESS == ret)
@@ -918,12 +843,6 @@ namespace oceanbase
             limit_count_ = int_value;
           }
         }
-      }
-
-      // next cell
-      if (OB_SUCCESS == ret)
-      {
-        ret = obj.deserialize(buf, data_len, pos);
       }
       return ret;
     }
@@ -956,15 +875,12 @@ namespace oceanbase
       }
       return ret;
     }
-    int ObScanParam::deserialize_groupby_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj)
+    
+    int ObScanParam::deserialize_groupby_param(const char * buf, const int64_t data_len, int64_t & pos)
     {
-      int ret = group_by_param_.deserialize(buf, data_len, pos);
-      if (OB_SUCCESS == ret)
-      {
-        ret = obj.deserialize(buf, data_len, pos);
-      }
-      return ret;
+      return group_by_param_.deserialize(buf, data_len, pos);
     }
+    
     int64_t ObScanParam::get_groupby_param_serialize_size(void) const
     {
       ObObj obj;
@@ -989,14 +905,9 @@ namespace oceanbase
       return ret;
     }
 
-    int ObScanParam::deserialize_filter_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj)
+    int ObScanParam::deserialize_filter_param(const char * buf, const int64_t data_len, int64_t & pos)
     {
-      int ret = condition_filter_.deserialize(buf, data_len, pos);
-      if (OB_SUCCESS == ret)
-      {
-        ret = obj.deserialize(buf, data_len, pos);
-      }
-      return ret;
+      return condition_filter_.deserialize(buf, data_len, pos);
     }
 
     int64_t ObScanParam::get_filter_param_serialize_size(void) const
@@ -1015,13 +926,12 @@ namespace oceanbase
       return obj.serialize(buf, buf_len, pos);
     }
 
-    int ObScanParam::deserialize_end_param(const char * buf, const int64_t data_len, int64_t & pos, ObObj & obj)
+    int ObScanParam::deserialize_end_param(const char * buf, const int64_t data_len, int64_t & pos)
     {
       // no data
       UNUSED(buf);
       UNUSED(data_len);
       UNUSED(pos);
-      UNUSED(obj);
       return 0;
     }
 
@@ -1058,6 +968,13 @@ namespace oceanbase
         TBSYS_LOG(WARN,"sizeof order list not coincident with column id/name list");
         ret = OB_ERR_UNEXPECTED;
       }
+
+      // RESERVE_PARAM_FIELD
+      if (OB_SUCCESS == ret)
+      {
+        ret = ObReadParam::serialize_reserve_param(buf, buf_len, pos);
+      }
+
       // BASIC_PARAM_FIELD
       if (OB_SUCCESS == ret)
       {
@@ -1065,7 +982,7 @@ namespace oceanbase
       }
 
       // COLUMN_PARAM_FIELD
-      if (ret == OB_SUCCESS)
+      if (OB_SUCCESS == ret)
       {
         ret = serialize_column_param(buf, buf_len, pos);
       }
@@ -1083,7 +1000,7 @@ namespace oceanbase
       }
 
       // SORT_PARAM_FIELD
-      if (ret == OB_SUCCESS)
+      if (OB_SUCCESS == ret)
       {
         ret = serialize_sort_param(buf, buf_len, pos);
       }
@@ -1107,45 +1024,51 @@ namespace oceanbase
       // reset contents 
       reset();
       ObObj obj;
-      int ret = obj.deserialize(buf, data_len, pos);
+      int ret = OB_SUCCESS;
       while (OB_SUCCESS == ret)
       {
-        if (ObExtendType != obj.get_type())
+        do
         {
           ret = obj.deserialize(buf, data_len, pos);
-        }
-        else if (ObActionFlag::END_PARAM_FIELD != obj.get_ext())
+        } while (OB_SUCCESS == ret && ObExtendType != obj.get_type());
+        
+        if (OB_SUCCESS == ret && ObActionFlag::END_PARAM_FIELD != obj.get_ext())
         {
           switch (obj.get_ext())
           {
+          case ObActionFlag::RESERVE_PARAM_FIELD:
+            {
+              ret = ObReadParam::deserialize_reserve_param(buf, data_len, pos);
+              break;
+            }
           case ObActionFlag::BASIC_PARAM_FIELD:
             {
-              ret = deserialize_basic_param(buf, data_len, pos, obj);
+              ret = deserialize_basic_param(buf, data_len, pos);
               break;
             }
           case ObActionFlag::COLUMN_PARAM_FIELD:
             {
-              ret = deserialize_column_param(buf, data_len, pos, obj);
+              ret = deserialize_column_param(buf, data_len, pos);
               break;
             }
           case ObActionFlag::SORT_PARAM_FIELD:
             {
-              ret = deserialize_sort_param(buf, data_len, pos, obj);
+              ret = deserialize_sort_param(buf, data_len, pos);
               break;
             }
           case ObActionFlag::LIMIT_PARAM_FIELD:
             {
-              ret = deserialize_limit_param(buf, data_len, pos, obj);
+              ret = deserialize_limit_param(buf, data_len, pos);
               break;
             }
           case ObActionFlag::FILTER_PARAM_FIELD:
             {
-              ret = deserialize_filter_param(buf, data_len, pos, obj);
+              ret = deserialize_filter_param(buf, data_len, pos);
               break;
             }
           case ObActionFlag::GROUPBY_PARAM_FIELD:
             {
-              ret = deserialize_groupby_param(buf,data_len,pos,obj);
+              ret = deserialize_groupby_param(buf, data_len, pos);
               break;
             }
           default:
@@ -1167,6 +1090,7 @@ namespace oceanbase
     DEFINE_GET_SERIALIZE_SIZE(ObScanParam)
     {
       int64_t total_size = get_basic_param_serialize_size();
+      total_size += ObReadParam::get_reserve_param_serialize_size();
       total_size += get_column_param_serialize_size();
       total_size += get_filter_param_serialize_size();
       total_size += get_groupby_param_serialize_size();

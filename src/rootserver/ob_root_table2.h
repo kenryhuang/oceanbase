@@ -72,7 +72,8 @@ namespace oceanbase
         void server_off_line(const int32_t server_index, const int64_t time_stamp);
 
         void dump() const;
-
+        void dump_unusual_tablets(int64_t current_version, int32_t replicas_num) const;
+      
         const common::ObTabletInfo* get_tablet_info(const const_iterator& it) const;
         common::ObTabletInfo* get_tablet_info(const const_iterator& it);
 

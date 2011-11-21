@@ -154,6 +154,9 @@ namespace oceanbase
       char sstable_file_path[OB_MAX_FILE_NAME_LENGTH];
       char range_buf[OB_RANGE_STR_BUFSIZ];
 
+      common::IFileInfoMgr& serving_fileinfo_cache = 
+        manager_.get_serving_tablet_image().get_fileinfo_cache();
+
       if ( OB_SUCCESS !=  (ret = expired_image_.acquire_tablet(range, 
               ObMultiVersionTabletImage::SCAN_FORWARD, tablet)) )
       {
@@ -167,6 +170,17 @@ namespace oceanbase
         for (int64_t i = 0; i < sstable_id_list.get_array_index(); ++i)
         {
           sstable_id = *sstable_id_list.at(i);
+          
+          // destroy file info cache if exist.
+          const IFileInfo * ifileinfo = 
+            serving_fileinfo_cache.get_fileinfo(sstable_id.sstable_file_id_);
+          FileInfo * fileinfo = const_cast<FileInfo*>(dynamic_cast<const FileInfo*>(ifileinfo));
+          if (NULL != fileinfo) 
+          {
+            fileinfo->destroy();
+            serving_fileinfo_cache.revert_fileinfo(fileinfo);
+          }
+
           ret = get_sstable_path(sstable_id, sstable_file_path, OB_MAX_FILE_NAME_LENGTH);
           if (OB_SUCCESS != ret)
           {

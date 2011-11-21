@@ -21,6 +21,7 @@
 #include "common/ob_action_flag.h"
 #include "common/ob_tsi_factory.h"
 #include "common/ob_trace_log.h"
+#include "ob_merge_server_main.h"
 #include "ob_read_param_modifier.h"
 #include "ob_ms_tsi.h"
 #include "ob_ms_define.h"
@@ -51,7 +52,7 @@ void oceanbase::mergeserver::ObMergeJoinOperator::initialize()
 }
 
 oceanbase::mergeserver::ObMergeJoinOperator::ObMergeJoinOperator(ObMergerRpcProxy &rpc_proxy)
-  :rpc_proxy_(&rpc_proxy)
+:rpc_proxy_(&rpc_proxy)
 {
   initialize();
 }
@@ -794,20 +795,16 @@ int oceanbase::mergeserver::ObMergeJoinOperator::merge_next_row(int64_t &cur_row
   int64_t not_exist_cell_num  = 0;
   int64_t exist_cell_num_got = 0;
   int64_t ext_val = 0;
-  if (NULL != scan_param_)
+  if (OB_SUCCESS == err)
   {
-    cur_cell_initializer.table_id_ = scan_param_->get_table_id();
-  }
-  else
-  {
-    if (NULL != get_param_->operator [](cur_row_beg))
+    if (cur_row_beg < req_param_->get_cell_size())
     {
-      cur_cell_initializer.table_id_ = get_param_->operator [](cur_row_beg)->table_id_;
+      cur_cell_initializer.table_id_ = req_param_->operator [](cur_row_beg)->table_id_;
     }
     else
     {
-      TBSYS_LOG(ERROR,"unexpected error [cur_row_beg:%ld,get_param_->get_cell_size():%ld]", 
-        cur_row_beg, get_param_->get_cell_size());
+      TBSYS_LOG(WARN,"unexpected error [cur_row_beg:%ld,req_param_->get_cell_size():%ld]", 
+        cur_row_beg, req_param_->get_cell_size());
       err = OB_ERR_UNEXPECTED;
     }
   }
@@ -1393,6 +1390,7 @@ int oceanbase::mergeserver::ObMergeJoinOperator::get_next_get_rpc_result()
     {
       got_cell_num_ += fullfilled_cell_num;
     }
+    req_param_ = &cur_get_param_;
   }
   return err;
 }
@@ -1551,8 +1549,10 @@ bool oceanbase::mergeserver::ObGetMergeJoinAgentImp::is_request_fullfilled()
 }
 
 
+bool oceanbase::mergeserver::ObScanMergeJoinAgentImp::return_uncomplete_result_ = false;
+
 oceanbase::mergeserver::ObScanMergeJoinAgentImp::ObScanMergeJoinAgentImp(ObMergerRpcProxy &proxy)
-  :merge_join_operator_(proxy)
+:merge_join_operator_(proxy)
 {
   pfinal_result_ = NULL;
   ups_stream_ = NULL;
@@ -1733,7 +1733,7 @@ int oceanbase::mergeserver::ObScanMergeJoinAgentImp::prepare_final_result_()
   }
   if (OB_SUCCESS == err && limit_offset_ > 0)
   {
-    err = jump_limit_offset_(merge_join_operator_,limit_offset_ * real_row_width);
+    err = jump_limit_offset_(*pfinal_result_,limit_offset_ * real_row_width);
     if (OB_SUCCESS == err)
     {
       limit_offset_ = 0;
@@ -1777,7 +1777,7 @@ int oceanbase::mergeserver::ObScanMergeJoinAgentImp::prepare_final_result_proces
     ///   must be careful, it is a bad experience
     for (int64_t i = merge_join_operator_.get_consumed_cell_num(); 
       i < merge_join_operator_.get_cell_size() && OB_SUCCESS == err; 
-      i += org_row_width, got_row_count ++)
+      i += org_row_width)
     {
       err = filter_org_row_(merge_join_operator_,i,i+org_row_width-1,param_->get_filter_info(),pass_filter);
       if ((OB_SUCCESS == err) && pass_filter)
@@ -1785,9 +1785,10 @@ int oceanbase::mergeserver::ObScanMergeJoinAgentImp::prepare_final_result_proces
         err = groupby_operator_.add_row(merge_join_operator_,i, i + org_row_width - 1);
         if (OB_SUCCESS == err)
         {
+          got_row_count ++;
           if (!need_fetch_all_result)
           {
-            if (((limit_count_ > 0)  && (limit_count_ <= got_row_count + 1))
+            if (((limit_count_ > 0)  && (limit_count_ + limit_offset_ <= got_row_count))
               || ((max_avail_mem_size_ > 0 ) 
               && (groupby_operator_.get_memory_size_used() > max_avail_mem_size_)))
             {
@@ -1800,9 +1801,17 @@ int oceanbase::mergeserver::ObScanMergeJoinAgentImp::prepare_final_result_proces
             if (max_avail_mem_size_ > 0
               && groupby_operator_.get_memory_size_used() > max_avail_mem_size_)
             {
-              TBSYS_LOG(WARN,"groupby result take too much memory [used:%ld,max_avail:%ld]",
-                groupby_operator_.get_memory_size_used(), max_avail_mem_size_);
-              err  = OB_MEM_OVERFLOW;
+              if (return_uncomplete_result_ && (param_->get_group_by_param().get_aggregate_row_width() == 0))
+              {
+                size_over_flow = true;
+                break;
+              }
+              else
+              {
+                TBSYS_LOG(WARN,"groupby result take too much memory [used:%ld,max_avail:%ld]",
+                  groupby_operator_.get_memory_size_used(), max_avail_mem_size_);
+                err  = OB_MEM_OVERFLOW;
+              }
             }
           }
         }

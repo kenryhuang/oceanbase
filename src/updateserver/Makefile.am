@@ -11,11 +11,16 @@ LDADD = $(top_builddir)/src/sstable/libsstable.a \
 		${TBLIB_ROOT}/lib/libtbnet.a \
 		${TBLIB_ROOT}/lib/libtbsys.a 
 
-AM_LDFLAGS = -lnuma -lpthread -lc -lm -lrt -ldl -laio
 CXXFLAGS+=-D__VERSION_ID__="\"updateserver 1.0.0.0\""
 CXXFLAGS+=-D_BTREE_ENGINE_
 #CXXFLAGS+=-pg
 #CXXFLAGS+=-O2 -Wno-strict-aliasing
+AM_LDFLAGS = -lnuma -lpthread -lc -lm -lrt -ldl -laio
+
+if COVERAGE
+CXXFLAGS+=-fprofile-arcs -ftest-coverage
+AM_LDFLAGS+=-lgcov
+endif
 
 noinst_LIBRARIES = libupdateserver.a
 libupdateserver_a_SOURCES = ob_hash_engine.cpp \
@@ -41,6 +46,8 @@ libupdateserver_a_SOURCES = ob_hash_engine.cpp \
                             ob_ups_fetch_runnable.cpp \
                             ob_multi_file_utils.cpp \
                             ob_schema_mgrv2.cpp \
+                            ob_commit_log_receiver.cpp \
+                            ob_ups_fetch_lsync.cpp \
                             ob_ups_stat.cpp
 
 bin_PROGRAMS = updateserver ups_mon
@@ -78,7 +85,12 @@ EXTRA_DIST = \
 	ob_store_mgr.h \
 	ob_memtable_rowiter.h \
 	ob_multi_file_utils.h \
+	ob_commit_log_receiver.h \
+	ob_ups_fetch_lsync.h \
+	ob_obi_slave_stat.h\
 	updateserver.conf.template
 
 pkgdata_data_DATA=updateserver.conf.template
 pkgdata_datadir=${prefix}/etc
+clean-local:
+	-rm -f *.gcov *.gcno *.gcda

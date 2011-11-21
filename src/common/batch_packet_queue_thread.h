@@ -47,6 +47,8 @@ public:
     // stop
     void stop(bool waitFinish = false);
 
+    void clear();
+
     // push
     bool push(ObPacket *packet, int maxQueueLen = 0, bool block = true);
 

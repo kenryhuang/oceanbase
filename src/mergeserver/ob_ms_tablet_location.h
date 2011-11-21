@@ -37,7 +37,7 @@ namespace oceanbase
     
     public:
       /// cache item timeout when error occured
-      static const int64_t CACHE_ERROR_TIMEOUT = 1000 * 1000 * 5L; // 5s
+      static const int64_t CACHE_ERROR_TIMEOUT = 1000 * 1000 * 2L; // 2s
 
       // cache item alive timeout interval
       static const int64_t DEFAULT_ALIVE_TIMEOUT = 1000 * 1000 * 60 * 10L; // 10minutes

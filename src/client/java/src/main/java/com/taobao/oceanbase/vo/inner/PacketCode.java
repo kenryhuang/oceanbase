@@ -2,6 +2,7 @@ package com.taobao.oceanbase.vo.inner;
 
 import com.taobao.oceanbase.network.packet.BaseResponsePacket;
 import com.taobao.oceanbase.network.packet.GetSchemaResponsePacket;
+import com.taobao.oceanbase.network.packet.OBIConfigResponseInfo;
 import com.taobao.oceanbase.network.packet.OBIRoleResponseInfo;
 import com.taobao.oceanbase.network.packet.ObGetUpdateServerInfoResponse;
 import com.taobao.oceanbase.network.packet.ResponsePacket;
@@ -41,6 +42,12 @@ public enum PacketCode {
 	OB_GET_OBI_ROLE(163),OB_GET_OBI_RESPONSE(164) {
 			protected BaseResponsePacket createPacket(int request,byte[] data) {
 				return new OBIRoleResponseInfo(request, data);
+			}
+	},
+	
+	OB_GET_OBI_CONFIG(173),OB_GET_OBI_CONFIG_RESPONSE(174) {
+			protected BaseResponsePacket createPacket(int request, byte[] data) {
+				return new OBIConfigResponseInfo(request, data);
 			}
 	};
 	

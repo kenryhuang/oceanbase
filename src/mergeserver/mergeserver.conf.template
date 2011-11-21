@@ -4,13 +4,21 @@ port=2800
 #listen device
 dev_name=bond0
 #建议配置512，该配置项会增加内存的占用每个task占用2M内存
-task_queue_size=512
+task_queue_size=100000
 #建议配置30~50，取决于机器上部署的模块，可以使用的核心的4倍
 task_thread_count=50
-#ms与cs、ups的网络通信超时时间，建议配置3000000(3s)，复杂查询可以增大
-network_timeout_us=3000000
+# task left time for drop ahead (100 ms)
+task_left_time_us=100000
+#ms与cs、ups的网络通信超时时间，建议配置3000000(1s)，复杂查询可以增大
+network_timeout_us=1000000
 #tablet location cache size in Mbytes，建议最小配置32M(256*tablet数量*1.2)
 location_cache_size_mb=32
+# ups black list fail threshold count (20)
+blacklist_fail_count=20
+# ups black list timeout (10s)
+blacklist_timeout_us=10000000
+# fetch ups list interval (40s)
+upslist_interval_us=40000000
 #tablet location cache timeout in us，建议配置分钟级，默认配置10分钟
 location_cache_timeout_us=600000000
 #日志文件路径

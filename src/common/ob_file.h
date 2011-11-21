@@ -150,40 +150,41 @@ namespace oceanbase
           char *buffer_;
       };
 
-      //class BufferFileAppender : public IFileAppender
-      //{
-      //  static const int NORMAL_FLAGS = O_WRONLY;
-      //  static const int CREAT_FLAGS = O_CREAT;
-      //  static const int TRUNC_FLAGS = O_TRUNC;
-      //  static const int EXCL_FLAGS = O_EXCL;
-      //  static const int OPEN_MODE = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
-      //  public:
-      //    static const int64_t DEFAULT_BUFFER_SIZE = 2 * 1024 * 1024;
-      //  public:
-      //    BufferFileAppender(const int64_t buffer_size = DEFAULT_BUFFER_SIZE);
-      //    ~BufferFileAppender();
-      //  public:
-      //    int append(const void *buf, const int64_t count, const bool is_fsync);
-      //    int async_append(const void *buf, const int64_t count, IFileAsyncCallback *callback);
-      //    int fsync();
-      //    int get_open_flags() const;
-      //    int get_open_mode() const;
-      //  private:
-      //    int buffer_sync_();
-      //  private:
-      //    int prepare_buffer_();
-      //    void set_normal_flags_();
-      //    void add_truncate_flags_();
-      //    void add_create_flags_();
-      //    void add_excl_flags_();
-      //    void set_file_pos_(const int64_t file_pos);
-      //  private:
-      //    int open_flags_;
-      //    const int64_t buffer_size_;
-      //    int64_t buffer_pos_;
-      //    int64_t file_pos_;
-      //    char *buffer_;
-      //};
+      class BufferFileAppender : public IFileAppender
+      {
+        static const int NORMAL_FLAGS = O_WRONLY;
+        static const int CREAT_FLAGS = O_CREAT;
+        static const int TRUNC_FLAGS = O_TRUNC;
+        static const int EXCL_FLAGS = O_EXCL;
+        static const int OPEN_MODE = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+        public:
+          static const int64_t DEFAULT_BUFFER_SIZE = 2 * 1024 * 1024;
+        public:
+          BufferFileAppender(const int64_t buffer_size = DEFAULT_BUFFER_SIZE);
+          ~BufferFileAppender();
+        public:
+          int append(const void *buf, const int64_t count, const bool is_fsync);
+          int async_append(const void *buf, const int64_t count, IFileAsyncCallback *callback);
+          int fsync();
+          int get_open_flags() const;
+          int get_open_mode() const;
+          int64_t get_file_pos() const {return file_pos_;}
+        private:
+          int buffer_sync_();
+        private:
+          int prepare_buffer_();
+          void set_normal_flags_();
+          void add_truncate_flags_();
+          void add_create_flags_();
+          void add_excl_flags_();
+          void set_file_pos_(const int64_t file_pos);
+        private:
+          int open_flags_;
+          const int64_t buffer_size_;
+          int64_t buffer_pos_;
+          int64_t file_pos_;
+          char *buffer_;
+      };
 
       class DirectFileAppender : public IFileAppender
       {
@@ -207,7 +208,7 @@ namespace oceanbase
           int get_open_mode() const;
           int64_t get_file_pos() const {return file_pos_;}
         private:
-          int buffer_sync_();
+          int buffer_sync_(bool *need_truncate = NULL);
         private:
           int prepare_buffer_();
           void set_normal_flags_();
@@ -223,6 +224,7 @@ namespace oceanbase
           int64_t file_pos_;
           char *buffer_;
           int64_t buffer_length_;
+          int64_t align_warn_;
       };
     }
 

@@ -214,6 +214,11 @@ namespace oceanbase
       return chunk_merge_.init(this);
     }
 
+    ObChunkMerge & ObTabletManager::get_chunk_merge() 
+    {
+      return chunk_merge_;
+    }
+
     void ObTabletManager::destroy()
     {
       if ( is_init_ )
@@ -255,9 +260,19 @@ namespace oceanbase
       {
         // TODO , get newest tablet.
         rc = tablet_image.acquire_tablet(range, ObMultiVersionTabletImage::SCAN_FORWARD, 0, tablet);
-        if (OB_SUCCESS != rc)
+        if (OB_SUCCESS != rc || NULL == tablet)
         {
           TBSYS_LOG(ERROR, "acquire tablet error.");
+        }
+        else if ( range.compare_with_startkey2(tablet->get_range()) != 0
+            || range.compare_with_endkey2(tablet->get_range()) != 0)
+        {
+          char range_buf[OB_RANGE_STR_BUFSIZ];
+          range.to_string(range_buf, OB_RANGE_STR_BUFSIZ);
+          TBSYS_LOG(INFO, "migrate tablet range = <%s>", range_buf);
+          tablet->get_range().to_string(range_buf, OB_RANGE_STR_BUFSIZ);
+          TBSYS_LOG(INFO, "not equal to local tablet range = <%s>", range_buf);
+          rc = OB_ERROR;
         }
         else
         {
@@ -863,16 +878,6 @@ namespace oceanbase
       return err;
     }
 
-    void ObTabletManager::set_newest_frozen_version(const int64_t frozen_version)
-    {
-      return chunk_merge_.set_newest_frozen_version(frozen_version);
-    }
-
-    bool ObTabletManager::can_launch_next_merge_round(const int64_t memtable_frozen_version)
-    {
-      return chunk_merge_.can_launch_next_round(memtable_frozen_version);
-    }
-
     int ObTabletManager::merge_tablets(const int64_t memtable_frozen_version)
     {
       int ret = OB_SUCCESS;
@@ -883,7 +888,15 @@ namespace oceanbase
       {
         //update schema,
         //new version coming,clear join cache
-        join_cache_.clear();
+        join_cache_.destroy();
+        if (param_->get_join_cache_conf().cache_mem_size > 0) // <= 0 will disable the join cache
+        {
+          if ( (ret = join_cache_.init(param_->get_join_cache_conf().cache_mem_size)) != OB_SUCCESS)
+          {
+            TBSYS_LOG(ERROR,"init join cache failed");
+          }
+        }
+        disk_manager_.scan(param_->get_datadir_path(),param_->get_max_sstable_size());
         chunk_merge_.schedule(memtable_frozen_version);
       }
       return ret;
@@ -959,7 +972,7 @@ namespace oceanbase
       {
         while (OB_SUCCESS == err)
         {
-          while (OB_SUCCESS == err && (--num) >= 0)
+          while (OB_SUCCESS == err && num > 0)
           {
             err = image.get_next_tablet(tablet);
             if (OB_ITER_END == err)
@@ -979,11 +992,23 @@ namespace oceanbase
             }
             else
             {
+
+              if (!tablet->get_range().border_flag_.is_left_open_right_closed())
+              {
+                char range_buf[OB_RANGE_STR_BUFSIZ];
+                tablet->get_range().to_string(range_buf, OB_RANGE_STR_BUFSIZ);
+                TBSYS_LOG(WARN, "report illegal tablet range = <%s>", range_buf);
+              }
+
               fill_tablet_info(*tablet, tablet_info);
               err = report_info_list->add_tablet(tablet_info);
               if (OB_SUCCESS != err)
               {
                 TBSYS_LOG(WARN, "failed to add tablet info, num=%ld, err=%d", num, err);
+              }
+              else
+              {
+                --num;
               }
 
               if (OB_SUCCESS != image.release_tablet(tablet))
@@ -1567,6 +1592,11 @@ namespace oceanbase
     ObRegularRecycler& ObTabletManager::get_regular_recycler()
     {
       return regular_recycler_;
+    }
+
+    ObScanRecycler& ObTabletManager::get_scan_recycler()
+    {
+      return scan_recycler_;
     }
 
     mergeserver::ObJoinCache& ObTabletManager::get_join_cache()

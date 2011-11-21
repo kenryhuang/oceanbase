@@ -73,6 +73,11 @@ namespace oceanbase
       char *get_old_value();
 
       /**
+       * 得到old_key
+       */
+      char *get_old_key();
+
+      /**
        * 加key到list中
        */
       void add_key_to_list(char *key, int32_t value);
@@ -103,7 +108,7 @@ namespace oceanbase
       // 下一代副本, 如果存在下一代副本, 此handle是不能进行更新
       BtreeWriteHandle *next_handle_;
       // 删除或者覆盖更新时返回原value
-      char *old_value_;
+      char *old_value_, *old_key_;
 
       // 存放引用计数要减一的key
       BtreeArrayList old_key_list_;

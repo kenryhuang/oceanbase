@@ -41,16 +41,18 @@ namespace oceanbase
         tbnet::IPacketHandler::HPRetCode handlePacket(tbnet::Connection *connection,
             tbnet::Packet *packet);
         int do_request(common::ObPacket* base_packet);
-
+        //
+        bool handle_overflow_packet(common::ObPacket* base_packet);
+        void handle_timeout_packet(common::ObPacket* base_packet);
       public:
         common::ThreadSpecificBuffer::Buffer* get_response_buffer() const;
 
         common::ThreadSpecificBuffer* get_rpc_buffer();
-      
+
         const common::ObServer& get_self() const;
 
         const common::ObServer& get_root_server() const;
-        
+
         const common::ObServer& get_update_server() const;
        
         common::ObTimer& get_timer();
@@ -67,17 +69,15 @@ namespace oceanbase
         DISALLOW_COPY_AND_ASSIGN(ObMergeServer);
         int init_root_server();
         int set_self(const char* dev_name, const int32_t port);
-    
+        // handle no response request add timeout as process time for monitor info
+        void handle_no_response_request(common::ObPacket * base_packet); 
       private:
         common::ObPacketFactory packet_factory_;
         ObMergeServerParams ms_params_;
-        
-        //
         common::ObTimer task_timer_;
         common::ThreadSpecificBuffer response_buffer_;
         common::ThreadSpecificBuffer rpc_buffer_;
         common::ObClientManager client_manager_;
-        
         common::ObServer self_;
         common::ObServer root_server_;
         common::ObServer update_server_;

@@ -169,7 +169,11 @@ namespace oceanbase
       int close_sstable(int64_t& trailer_offset, int64_t& sstable_size);
 
       void set_file_sys(common::ObFileAppender& file_sys);
-
+      
+      void set_dio(const bool dio)
+      {
+        dio_ = dio;
+      }
     private:
       /**
        * reset sstable writer to reuse it
@@ -288,7 +292,8 @@ namespace oceanbase
       bool inited_;                              //whether sstable writer is inited
       bool first_row_;                           //whether first row in sstable
       bool add_row_count_;                       //whether add row count
-
+      bool dio_;                                 //whether write sstable using dio
+      
       common::ObFileAppender default_filesys_;   //file system
       common::ObFileAppender* filesys_;          //actual file system
       char filename_[MAX_SSTABLE_NAME_SIZE];     //full file name of sstable

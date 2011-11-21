@@ -21,7 +21,8 @@
 #include "common/ob_tablet_info.h"
 #include "common/ob_log_entry.h"
 #include "rootserver/ob_chunk_server_manager.h"
-
+#include "common/ob_ups_info.h"
+#include "common/ob_client_config.h"
 namespace oceanbase
 {
   namespace rootserver
@@ -37,6 +38,9 @@ namespace oceanbase
         void set_root_server(ObRootServer2* root_server);
         void set_log_manager(ObRootLogManager* log_manager);
         int apply(common::LogCommand cmd, const char* log_data, const int64_t& data_len);
+
+      uint64_t get_cur_log_file_id();
+      uint64_t get_cur_log_seq();
 
       public:
         int sync_schema(const int64_t timestamp);
@@ -67,7 +71,8 @@ namespace oceanbase
         int unload_us_done(const common::ObServer& server);
 
         int sync_us_frozen_version(const int64_t frozen_version);
-
+        int set_ups_list(const common::ObUpsList &ups_list);
+        int set_client_config(const common::ObClientConfig &client_conf);
       private:
         int log_server(const common::LogCommand cmd, const common::ObServer& server);
         int log_server_with_ts(const common::LogCommand cmd, const common::ObServer& server, const int64_t timestamp);
@@ -102,6 +107,8 @@ namespace oceanbase
         int do_cs_unload_done(const char* log_data, const int64_t& log_length);
         int do_us_unload_done(const char* log_data, const int64_t& log_length);
         int do_sync_frozen_version(const char* log_data, const int64_t& log_length);
+        int do_set_ups_list(const char* log_data, const int64_t& log_length);
+        int do_set_client_config(const char* log_data, const int64_t& log_length);
 
         void reset_cs_hb_time();
 
