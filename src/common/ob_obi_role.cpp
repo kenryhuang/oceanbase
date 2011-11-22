@@ -19,7 +19,7 @@
 using namespace oceanbase::common;
 
 ObiRole::ObiRole()
-  :role_(INIT)
+  :role_(MASTER)
 {
 }
 
