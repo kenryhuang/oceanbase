@@ -64,7 +64,7 @@ EXTRA_DIST = \
 
 pkgdata_data_DATA=oceanbase.sh
 pkgdata_datadir=${prefix}
-SUBDIRS=syschecker dump_data 
+SUBDIRS=syschecker dump_data obsql
 dist_bin_SCRIPTS=single-machine-bootstrap
 clean-local:
 	-rm -f *.gcov *.gcno *.gcda
